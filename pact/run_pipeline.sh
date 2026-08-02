@@ -15,10 +15,17 @@
 #  Every arm MUST share the same experiment overrides (see COMMON below) or the
 #  comparison is meaningless.  Change them in one place, never per arm.
 #
-#  Environment variables:
+#  Everything not listed below is left at BenchMARL's own defaults on purpose:
+#  the host configuration is not part of this contribution, and an arm that
+#  differs from the others in anything but its algorithm/model/pact_* flags is
+#  not comparable to them.
+#
+#  Optional environment variables (unset = BenchMARL default, nothing passed):
 #      RUNS=<dir>      where checkpoints go            (default: ./runs)
-#      DEVICE=cpu|cuda training device                 (default: cuda)
-#      FRAMES=<int>    frames per arm                  (default: 3000000)
+#      DEVICE=cuda     train/sample/buffer device      (default: unset -> cpu)
+#      FRAMES=<int>    experiment.max_n_frames         (default: unset -> 3e6)
+#      LOGGERS=csv     experiment.loggers              (default: unset -> csv,wandb)
+#      EXTRA="a=1 b=2" any further hydra overrides, applied to EVERY arm
 #      EVAL_DEVICE=... device for the eval scripts     (default: cpu)
 #      EPISODES=<int>  envs per evaluation cell        (default: 40)
 
@@ -28,31 +35,39 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 RUNS="${RUNS:-$REPO_ROOT/runs}"
-DEVICE="${DEVICE:-cuda}"
-FRAMES="${FRAMES:-3000000}"
 EVAL_DEVICE="${EVAL_DEVICE:-cpu}"
 EPISODES="${EPISODES:-40}"
 
 # ---------------------------------------------------------------------------
-# Shared experiment settings.  IDENTICAL for every arm -- that is the point.
+# Shared settings.  IDENTICAL for every arm -- that is the point.
+# These three are the minimum the pipeline needs:
+#   render=false           no display on a compute node
+#   checkpoint_at_end      there is nothing to evaluate without it
+#   save_folder (per arm)  so the report can find the checkpoints
 # ---------------------------------------------------------------------------
 COMMON=(
   "task=vmas_ns/navigation_pcw"
   "experiment.render=false"
-  "experiment.loggers=[csv]"            # add wandb here if it is configured
-  "experiment.max_n_frames=$FRAMES"
-  "experiment.sampling_device=$DEVICE"
-  "experiment.train_device=$DEVICE"
-  "experiment.buffer_device=$DEVICE"
-  # VMAS is vectorised, so use a wide batch; 60 worlds also means the driver's
-  # phase spread covers the cycle at 60 points in every batch and every eval.
-  "experiment.on_policy_n_envs_per_worker=60"
-  "experiment.on_policy_collected_frames_per_batch=6000"
-  "experiment.evaluation_episodes=60"
   "experiment.checkpoint_at_end=true"
-  "experiment.checkpoint_interval=600000"
-  "experiment.keep_checkpoints_num=2"
 )
+
+if [[ -n "${DEVICE:-}" ]]; then
+  COMMON+=(
+    "experiment.sampling_device=$DEVICE"
+    "experiment.train_device=$DEVICE"
+    "experiment.buffer_device=$DEVICE"
+  )
+fi
+if [[ -n "${FRAMES:-}" ]]; then
+  COMMON+=("experiment.max_n_frames=$FRAMES")
+fi
+if [[ -n "${LOGGERS:-}" ]]; then
+  COMMON+=("experiment.loggers=[$LOGGERS]")
+fi
+if [[ -n "${EXTRA:-}" ]]; then
+  # shellcheck disable=SC2206
+  COMMON+=($EXTRA)
+fi
 
 log()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 fail() { printf '\n\033[31mFAILED: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -160,10 +175,8 @@ stage_report() {
 # already proves the environments are byte-identical, so these two only need to
 # be long enough to compare learning curves.
 stage_n1() {
-  FRAMES_BACKUP="$FRAMES"
   launch n1_severity_on  "algorithm=ippo" "task.n_agents=1"
   launch n1_severity_off "algorithm=ippo" "task.n_agents=1" "task.ns_severity=0"
-  FRAMES="$FRAMES_BACKUP"
   echo "The two curves must be indistinguishable: at N=1 there is no channel."
 }
 

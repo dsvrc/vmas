@@ -244,9 +244,14 @@ policy and states which one binds.
 
 ## 5. Running the pipeline
 
-The whole thing is scripted. Every arm inherits one shared block of experiment
-overrides — if those differ between arms the comparison is meaningless, so they
-live in exactly one place (`COMMON` in the script).
+The whole thing is scripted. Every arm inherits one shared block of overrides —
+if those differ between arms the comparison is meaningless, so they live in
+exactly one place (`COMMON` in the script), and that block is deliberately tiny:
+`render=false`, `checkpoint_at_end=true`, and a per-arm `save_folder`. Everything
+else stays at BenchMARL's own defaults, including **cpu**. The host
+configuration is not part of this contribution and arms must not differ in it.
+Opt in with `DEVICE=cuda`, `FRAMES=…`, `LOGGERS=…`, or `EXTRA="…"`, which apply
+to every arm at once.
 
 ```bash
 bash pact/run_pipeline.sh check     # unit tests + calibration + smoke test  (~2 min, no GPU)
@@ -256,10 +261,9 @@ bash pact/run_pipeline.sh arms      # the 6 training arms
 bash pact/run_pipeline.sh report    # the final table
 ```
 
-`RUNS=<dir> DEVICE=cuda FRAMES=3000000` are the knobs; `arms` skips any arm that
-already has a checkpoint, so it is safe to re-run after an interruption, and
-`bash pact/run_pipeline.sh arm pact` runs a single arm. The sections below are
-what those stages do, if you would rather drive it by hand.
+`arms` skips any arm that already has a checkpoint, so it is safe to re-run after
+an interruption, and `bash pact/run_pipeline.sh arm pact` runs a single arm. The
+sections below are what those stages do, if you would rather drive it by hand.
 
 ### 5.0 Sanity, before any GPU time
 
