@@ -281,36 +281,65 @@ def check_beta_zero_is_blind():
 
 
 def check_partial_reset():
-    """Pitfall P2: wrapper state must die exactly when its episode does."""
+    """Pitfall P2: wrapper state must die exactly when its episode does.
+
+    Probed with a ZERO-action step after the partial reset.  Zero thrust means
+    every message is zero, so the leak collapses to ``x2 <- rho * x2`` and the
+    contract becomes exact arithmetic with no thresholds:
+
+        reset worlds     -> exactly 0
+        untouched worlds -> exactly rho * their pre-reset value
+
+    (Comparing magnitudes after a *random*-action step would not work: a single
+    step injects ``(1-rho)*G*Phi``, which with G=20 can exceed the steady-state
+    magnitude of an untouched world where signs cancel across agents.)
+    """
     task = make_task(pact_enabled=True, ns_severity=0.8)
+    rho = float(task.config["ns_rho"])
     n_agents = task.config["n_agents"]
+    half = NUM_ENVS // 2
+
     env = make_env(task)
     env.set_seed(SEED)
     td = env.reset()
-    actions = fixed_actions(12, NUM_ENVS, n_agents, 3, seed=17)
-    for action in actions:
+    x2_before = None
+    for action in fixed_actions(12, NUM_ENVS, n_agents, 3, seed=17):
         td.set((GROUP, "action"), action)
         td = env.step(td)
+        x2_before = td.get(("next", GROUP, "info")).get("ns_x2").squeeze(-1).clone()
         td = step_mdp(td)
+    assert float(x2_before.abs().min()) > 0, "the accumulator never charged"
 
-    reset_mask = torch.zeros(NUM_ENVS, 1, dtype=torch.bool)
-    reset_mask[: NUM_ENVS // 2] = True
+    reset_mask = (
+        torch.zeros_like(td.get("done"), dtype=torch.bool)
+        if "done" in td.keys()
+        else torch.zeros(NUM_ENVS, 1, dtype=torch.bool)
+    )
+    reset_mask[:half] = True
     td.set("_reset", reset_mask)
     td = env.reset(td)
 
-    td.set((GROUP, "action"), actions[0])
+    td.set((GROUP, "action"), torch.zeros(NUM_ENVS, n_agents, 3))
     td = env.step(td)
     info = td.get(("next", GROUP, "info"))
     env_x2 = info.get("ns_x2").squeeze(-1)
     pact_x2 = info.get("pact_x2").squeeze(-1)
 
-    assert torch.allclose(env_x2, pact_x2, atol=1e-5), "env and PACT disagree after a partial reset"
-    fresh = env_x2[: NUM_ENVS // 2].abs()
-    stale = env_x2[NUM_ENVS // 2 :].abs()
-    assert float(fresh.max()) < float(stale.mean()), (
-        "reset worlds do not have a fresher accumulator than untouched ones"
+    # both sides must reset, and must reset identically
+    assert torch.allclose(
+        env_x2, pact_x2, atol=1e-5
+    ), "env and PACT disagree after a partial reset"
+
+    fresh = float(env_x2[:half].abs().max())
+    assert fresh < 1e-6, f"reset worlds kept a stale accumulator (max |x2| = {fresh})"
+
+    expected = rho * x2_before[half:]
+    assert torch.allclose(env_x2[half:], expected, atol=1e-5), (
+        "untouched worlds were disturbed by another world's reset: "
+        f"got {env_x2[half:].flatten()[:4].tolist()}, expected "
+        f"{expected.flatten()[:4].tolist()}"
     )
-    return "partial reset clears exactly the reset worlds, on both sides"
+    return f"reset worlds -> 0, untouched worlds -> rho*x2 exactly (rho={rho})"
 
 
 def check_ctde_actor_is_blind_to_the_payload():

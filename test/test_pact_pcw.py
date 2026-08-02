@@ -180,6 +180,25 @@ def test_n1_reduces_the_environment_exactly():
             assert torch.equal(got, torch.tensor(act[t][0]))
 
 
+def test_zero_thrust_makes_the_leak_a_pure_decay():
+    """The probe the partial-reset integration check rests on.
+
+    With zero thrust every message is zero, so the recursion collapses to
+    ``x2 <- rho * x2`` and a reset becomes checkable as exact arithmetic instead
+    of a magnitude comparison.
+    """
+    generator = torch.Generator().manual_seed(21)
+    x2 = torch.randn(5, 3, generator=generator)
+    pos = torch.randn(5, 3, 2, generator=generator)
+    phi = core.peer_mean(core.angular_impulse(pos, torch.zeros(5, 3, 2)))
+    assert torch.equal(phi, torch.zeros_like(phi))
+    got = core.leak_step(x2, phi, rho=RHO, gain=GAIN)
+    assert torch.allclose(got, RHO * x2, atol=1e-7)
+    # and a reset world (x2 == 0) stays exactly 0
+    zeroed = core.leak_step(torch.zeros(5, 3), phi, rho=RHO, gain=GAIN)
+    assert torch.equal(zeroed, torch.zeros(5, 3))
+
+
 def test_leak_step_matches_reference():
     x2 = torch.tensor([0.3, -1.2])
     phi = torch.tensor([0.5, 0.25])
