@@ -91,6 +91,12 @@ def main():
         default=[0.8, 0.9, 1.0, 1.1, 1.2],
         help="beta multipliers used for the gain-tolerance read-out",
     )
+    parser.add_argument(
+        "--target-severity",
+        type=float,
+        default=None,
+        help="severity Phase 2 will train at; defaults to the task yaml's ns_severity",
+    )
     args = parser.parse_args()
 
     print(f"Loading {args.checkpoint}")
@@ -214,8 +220,13 @@ def main():
         # ------------------------------------------------------------------
         # the decision Phase 1 forces
         # ------------------------------------------------------------------
-        target = float(experiment.task.config.get("ns_severity", 0.0))
-        print(f"\nDECISION: configured ns_severity = {target}")
+        # The severity Phase 2 will TRAIN at, which lives in the task yaml -- not
+        # experiment.task.config, which is the B0 checkpoint's own config and is
+        # therefore always 0 by construction.
+        target = args.target_severity
+        if target is None:
+            target = float(task_from().config["ns_severity"])
+        print(f"\nDECISION: ns_severity configured for training = {target}")
         frontier = operational if operational is not None else sigma_star
         if frontier is not None and target <= frontier:
             print(
