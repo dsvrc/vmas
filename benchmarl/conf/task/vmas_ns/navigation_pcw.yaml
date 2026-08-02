@@ -32,7 +32,7 @@ agent_radius: 0.1
 # =============================================================================
 # sigma.  0.0 reduces the environment to stock navigation, byte for byte, and is
 # how the B0 baseline is run:
-#     python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
+#     python pact/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
 #            task.ns_severity=0
 # Calibrated operating point (surrogate, driver frozen at peak, N=3):
 #     sigma  0.2 -> blind 89% of B0      (too mild)

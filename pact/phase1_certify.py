@@ -31,7 +31,7 @@
 #
 #  Usage:
 #      # 1. train B0 (the NS off).  Reuse this one checkpoint for the whole sweep.
-#      python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
+#      python pact/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
 #             task.ns_severity=0 experiment.checkpoint_at_end=true \
 #             experiment.render=false
 #

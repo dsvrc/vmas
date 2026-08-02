@@ -2,7 +2,10 @@
 #
 #  Run it exactly like any other BenchMARL task:
 #
-#      python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw
+#      python pact/run.py algorithm=ippo task=vmas_ns/navigation_pcw
+#
+#  (pact/run.py rather than benchmarl/run.py so the imported package and the
+#  hydra configs are guaranteed to come from the same checkout -- see pact/run.py.)
 #
 #  The scenario is passed to ``VmasEnv`` as an *instance*, so nothing has to be
 #  copied into the installed ``vmas`` package.

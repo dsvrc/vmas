@@ -7,8 +7,50 @@ pipeline (Phase 1 certification, Phase 2 method, ceiling and ablation arms).
 Everything runs through the normal BenchMARL entry point:
 
 ```bash
-python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw experiment.render=false
+python pact/run.py algorithm=ippo task=vmas_ns/navigation_pcw experiment.render=false
 ```
+
+> **Use `pact/run.py`, not `benchmarl/run.py`.** `python benchmarl/run.py` puts
+> `benchmarl/` on `sys.path[0]` rather than the repo root, so `import benchmarl`
+> resolves to whatever is installed in site-packages while hydra reads yaml from
+> *this* checkout. When those differ, the task yaml is found but its ConfigStore
+> schema is not, and hydra fails with `Could not load
+> 'task/vmas_ns_navigation_pcw_config'` — an import-path bug that reads like a
+> config bug (PACT pitfall #4). `pact/run.py` pins the repo root and asserts the
+> two agree before starting. `benchmarl/run.py` works too if you either
+> `pip install -e .` from the repo root or prefix `PYTHONPATH=$PWD`.
+
+### Nothing in the installed `vmas` needs replacing
+
+**Do not copy anything over `vmas/scenarios/navigation.py`.** The installed
+`vmas` package is never modified and never read for this task.
+
+`VmasNsClass.get_env_fun` hands `VmasEnv` a scenario **instance**, not a scenario
+*name*:
+
+```python
+VmasEnv(scenario=Scenario(), num_envs=..., ...)   # an object, not "navigation_pcw"
+```
+
+`vmas.make_env` only falls back to `scenarios.load(<name>.py)` when it is given a
+string, so passing an object bypasses the package lookup entirely. The scenario
+lives at `benchmarl/environments/vmas_ns/scenario.py` and *subclasses*
+`vmas.scenarios.navigation.Scenario`, inheriting `reward`, `observation` and
+`done` untouched while overriding only `make_world`, `reset_world_at`,
+`process_action` and `info`.
+
+Two consequences worth having:
+
+- upgrading or reinstalling `vmas` cannot silently revert the non-stationarity,
+  and there is no "same-file-different-module" trap where knobs get set on a
+  repo copy while the run uses the installed one (PACT pitfall #4);
+- `vmas/navigation` and `vmas_ns/navigation_pcw` coexist, which is what lets
+  `smoke_test.py` check them against each other step by step.
+
+The evidence it is already wired: `pact/smoke_test.py` reports `the NS actually
+fires — max |theta| 4.475 rad ... trajectories diverge` against an unmodified
+`vmas` install. That check exists precisely because a non-stationarity that
+silently fails to fire looks identical to one that is working.
 
 ---
 
@@ -202,6 +244,23 @@ policy and states which one binds.
 
 ## 5. Running the pipeline
 
+The whole thing is scripted. Every arm inherits one shared block of experiment
+overrides — if those differ between arms the comparison is meaningless, so they
+live in exactly one place (`COMMON` in the script).
+
+```bash
+bash pact/run_pipeline.sh check     # unit tests + calibration + smoke test  (~2 min, no GPU)
+bash pact/run_pipeline.sh b0        # the baseline every later stage needs
+bash pact/run_pipeline.sh phase1    # certify sigma*                         (~10 min)
+bash pact/run_pipeline.sh arms      # the 6 training arms
+bash pact/run_pipeline.sh report    # the final table
+```
+
+`RUNS=<dir> DEVICE=cuda FRAMES=3000000` are the knobs; `arms` skips any arm that
+already has a checkpoint, so it is safe to re-run after an interruption, and
+`bash pact/run_pipeline.sh arm pact` runs a single arm. The sections below are
+what those stages do, if you would rather drive it by hand.
+
 ### 5.0 Sanity, before any GPU time
 
 ```bash
@@ -230,7 +289,7 @@ the unit tests cannot reach because they are about wiring rather than arithmetic
 
 ```bash
 # B0: the NS off.  Severity-independent, so this ONE checkpoint serves the whole sweep.
-python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
+python pact/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
   task.ns_severity=0 experiment.render=false \
   experiment.checkpoint_at_end=true experiment.max_n_frames=3_000_000
 
@@ -249,26 +308,26 @@ understate σ*.
 COMMON="task=vmas_ns/navigation_pcw experiment.render=false experiment.checkpoint_at_end=true"
 
 # reference (upper bound, not the target)
-python benchmarl/run.py algorithm=ippo  $COMMON task.ns_severity=0
+python pact/run.py algorithm=ippo  $COMMON task.ns_severity=0
 
 # blind baselines
-python benchmarl/run.py algorithm=ippo  $COMMON
-python benchmarl/run.py algorithm=mappo $COMMON
-python benchmarl/run.py algorithm=ippo  $COMMON model=layers/gru      # memory alone does not fix it
+python pact/run.py algorithm=ippo  $COMMON
+python pact/run.py algorithm=mappo $COMMON
+python pact/run.py algorithm=ippo  $COMMON model=layers/gru      # memory alone does not fix it
 
 # PACT, fully decentralised (no privileged info anywhere)
-python benchmarl/run.py algorithm=ippo $COMMON task.pact_enabled=true model=layers/gru
+python pact/run.py algorithm=ippo $COMMON task.pact_enabled=true model=layers/gru
 
 # PACT + CTDE critic (driver in the critic only; execution stays decentralised)
-python benchmarl/run.py algorithm=mappo_ctde $COMMON task.pact_enabled=true model=layers/gru
+python pact/run.py algorithm=mappo_ctde $COMMON task.pact_enabled=true model=layers/gru
 
 # O1: the compensation ceiling (privileged at execution time — a reference, not a method)
-python benchmarl/run.py algorithm=ippo $COMMON \
+python pact/run.py algorithm=ippo $COMMON \
   task.pact_enabled=true task.pact_oracle=true model=layers/gru
 
 # irreducibility certificate: must equal the stationary task exactly
-python benchmarl/run.py algorithm=ippo $COMMON task.n_agents=1
-python benchmarl/run.py algorithm=ippo $COMMON task.n_agents=1 task.ns_severity=0
+python pact/run.py algorithm=ippo $COMMON task.n_agents=1
+python pact/run.py algorithm=ippo $COMMON task.n_agents=1 task.ns_severity=0
 ```
 
 `model=layers/gru` is **required** for the PACT arms: a memoryless policy cannot

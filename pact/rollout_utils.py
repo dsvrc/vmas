@@ -39,7 +39,15 @@ def load_experiment(checkpoint: str, device: Optional[str] = None) -> Experiment
     """Reload a BenchMARL experiment from a checkpoint, loggers muted."""
     patch: Dict[str, Any] = dict(_QUIET)
     if device is not None:
-        patch.update(sampling_device=device, train_device=device, buffer_device=device)
+        patch.update(
+            sampling_device=device,
+            train_device=device,
+            buffer_device=device,
+            # Arms are typically trained on GPU and replayed on CPU; without a
+            # map location torch.load would try to restore onto a device this
+            # process may not have.
+            restore_map_location=device,
+        )
     checkpoint = str(Path(checkpoint).resolve())
     return Experiment.reload_from_file(checkpoint, experiment_patch=patch)
 
