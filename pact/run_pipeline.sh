@@ -24,7 +24,7 @@
 #      RUNS=<dir>      where checkpoints go            (default: ./runs)
 #      DEVICE=cuda     train/sample/buffer device      (default: unset -> cpu)
 #      FRAMES=<int>    experiment.max_n_frames         (default: unset -> 3e6)
-#      LOGGERS=csv     experiment.loggers              (default: unset -> csv,wandb)
+#      LOGGERS=...     experiment.loggers              (default: csv)
 #      EXTRA="a=1 b=2" any further hydra overrides, applied to EVERY arm
 #      EVAL_DEVICE=... device for the eval scripts     (default: cpu)
 #      EPISODES=<int>  envs per evaluation cell        (default: 40)
@@ -37,6 +37,10 @@ cd "$REPO_ROOT"
 RUNS="${RUNS:-$REPO_ROOT/runs}"
 EVAL_DEVICE="${EVAL_DEVICE:-cpu}"
 EPISODES="${EPISODES:-40}"
+# BenchMARL defaults to [csv,wandb] and WandbLogger raises on import if wandb is
+# absent, so csv-only is the working default rather than a preference.
+# LOGGERS=csv,wandb re-enables it once wandb is installed and configured.
+LOGGERS="${LOGGERS:-csv}"
 
 # ---------------------------------------------------------------------------
 # Shared settings.  IDENTICAL for every arm -- that is the point.
@@ -49,6 +53,7 @@ COMMON=(
   "task=vmas_ns/navigation_pcw"
   "experiment.render=false"
   "experiment.checkpoint_at_end=true"
+  "experiment.loggers=[$LOGGERS]"
 )
 
 if [[ -n "${DEVICE:-}" ]]; then
@@ -60,9 +65,6 @@ if [[ -n "${DEVICE:-}" ]]; then
 fi
 if [[ -n "${FRAMES:-}" ]]; then
   COMMON+=("experiment.max_n_frames=$FRAMES")
-fi
-if [[ -n "${LOGGERS:-}" ]]; then
-  COMMON+=("experiment.loggers=[$LOGGERS]")
 fi
 if [[ -n "${EXTRA:-}" ]]; then
   # shellcheck disable=SC2206
