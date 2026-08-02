@@ -1,0 +1,102 @@
+defaults:
+  - vmas_ns_navigation_pcw_config
+  - _self_
+
+
+# =============================================================================
+# Stock VMAS navigation
+# =============================================================================
+# Only `max_steps` differs from benchmarl/conf/task/vmas/navigation.yaml.
+# At the stock 100-step horizon the task carries ~3x travel slack, which lets a
+# blind team recover by simply exerting less -- an escape that needs no
+# knowledge of the driver and would defeat *any* exertion-driven NS (guide
+# condition 7).  60 steps closes it while barely moving B0 (1.030 vs 1.046 in
+# the calibration surrogate); agents still comfortably reach their goals.
+# See pact/calibrate.py check [3].
+max_steps: 60
+n_agents: 3
+collisions: True
+agents_with_same_goal: 1
+split_goals: False
+observe_all_goals: False
+# Keep per-agent rewards.  With shared_rew the degenerate "everybody fly radial
+# so nobody stirs the medium" public good becomes individually rational and the
+# tragedy-of-the-commons structure the design depends on disappears.
+shared_rew: False
+lidar_range: 0.35
+agent_radius: 0.1
+
+
+# =============================================================================
+# The non-stationarity -- ONE severity dial
+# =============================================================================
+# sigma.  0.0 reduces the environment to stock navigation, byte for byte, and is
+# how the B0 baseline is run:
+#     python benchmarl/run.py algorithm=ippo task=vmas_ns/navigation_pcw \
+#            task.ns_severity=0
+# Calibrated operating point (surrogate, driver frozen at peak, N=3):
+#     sigma  0.2 -> blind 89% of B0      (too mild)
+#     sigma  0.4 -> blind 33% of B0
+#     sigma  0.6 -> blind 22% of B0
+#     sigma  0.8 -> blind 17% of B0      <-- default
+#     sigma  1.0 -> blind 12% of B0
+# Scripted compensation at the true gain holds 100% of B0 at every one of these.
+ns_severity: 0.8
+
+
+# =============================================================================
+# Fixed structural constants -- calibrate once, then leave alone
+# =============================================================================
+# G: radians of yaw deflection per unit of accumulated circulation.  Sized so
+# that sigma in [0, 1] spans "no effect" to "devastating" against the measured
+# operating scale of a goal-seeking policy (|Phi| rms ~ 0.20, |x2| rms ~ 3.5 rad
+# per unit c).  Re-run pact/calibrate.py if the base task changes.
+ns_gain: 20.0
+# Leak of the medium's circulation: 0.8 ~ a 5-step eddy memory.
+ns_rho: 0.8
+# Period of the exogenous driver, in GLOBAL env steps (never reset by episodes).
+# 2000 = ~33 episodes, so c is near-constant within an episode but drifts across
+# them, which is the regime PACT is built for.
+ns_driver_period: 2000
+# Give each vectorised world its own fixed offset in the driver cycle, so every
+# batch spans the full cycle at once (a fleet operating around the clock).
+# Makes each collection and each evaluation a cycle-average with low variance.
+# Set False for the single-global-phase ablation, where the whole population
+# collapses and recovers together.  This is an experimental-protocol switch,
+# NOT a severity knob.
+ns_phase_spread: True
+
+
+# =============================================================================
+# Phase 1 only
+# =============================================================================
+# Hold the driver at a constant value, turning the game stationary at effective
+# severity `ns_freeze_driver * ns_severity`.  1.0 = the peak, which is where
+# sigma* is defined.  Leave null for training.
+ns_freeze_driver: null
+
+
+# =============================================================================
+# PACT -- the method (env-side; the host algorithm is untouched)
+# =============================================================================
+# Adds one action dim (the gain w), appends [x2, beta, <|x2|>] to the
+# observation, and rewrites the executed command with the certified channel
+# inverse.  With beta = 0 this is the blind policy bit for bit.
+pact_enabled: False
+# Use the environment's TRUE deflection instead of beta * x2.  This is the O1
+# compensation-ceiling arm -- a reference, not a method: it consumes privileged
+# information at execution time.
+pact_oracle: False
+# Upper bound of the learned gain.  null -> 1.3 * peak c, per the PACT checklist.
+pact_beta_max: null
+# "affine" suits hosts that squash actions into [-1, 1] (BenchMARL's PPO configs
+# do): it spans the full range and starts at beta_max / 2, the direct-mode
+# partial-compensation initialisation.
+pact_beta_mode: affine
+pact_beta_ema: 0.3
+pact_obs_features: True
+# The one hard gate: per-step cosine between the computed waveform and the
+# environment's own accumulator.  Exact arithmetic, so a failure is a wiring bug
+# and the run aborts rather than quietly producing a wrong number.
+pact_gate: True
+pact_gate_tol: 0.999
