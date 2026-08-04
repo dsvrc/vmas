@@ -134,30 +134,54 @@ stage_phase1() {
   echo "Saved to $RUNS/phase1.log"
 }
 
-# The six Phase-2 arms.  Only the algorithm / model / pact_* flags differ.
-arm_blind_ippo()   { launch blind_ippo   "algorithm=ippo"; }
-arm_blind_mappo()  { launch blind_mappo  "algorithm=mappo"; }
-arm_blind_gru()    { launch blind_gru    "algorithm=ippo" "model=layers/gru"; }
-arm_pact()         { launch pact         "algorithm=ippo" "model=layers/gru" \
-                                         "task.pact_enabled=true"; }
-arm_pact_ctde()    { launch pact_ctde    "algorithm=mappo_ctde" "model=layers/gru" \
-                                         "task.pact_enabled=true"; }
-arm_ceiling()      { launch ceiling      "algorithm=ippo" "model=layers/gru" \
-                                         "task.pact_enabled=true" "task.pact_oracle=true"; }
+# ---------------------------------------------------------------------------
+# The Phase-2 arms.  Only the algorithm / model / pact_* flags differ.
+#
+# MEMORYLESS arms (cheap).  PACT itself needs no recurrence: the mechanism is
+# env-side and the host is untouched.  What a memoryless policy cannot do is
+# modulate beta with the driver phase, so it settles on one constant gain -- the
+# "constant-beta" tier, worth roughly half the gap in the PACT reference.  These
+# five already make a complete result: blind vs PACT vs the ceiling.
+# ---------------------------------------------------------------------------
+arm_blind_ippo()  { launch blind_ippo  "algorithm=ippo"; }
+arm_blind_mappo() { launch blind_mappo "algorithm=mappo"; }
+arm_pact_ippo()   { launch pact_ippo   "algorithm=ippo"  "task.pact_enabled=true"; }
+arm_pact_mappo()  { launch pact_mappo  "algorithm=mappo" "task.pact_enabled=true"; }
+arm_pact_ctde()   { launch pact_ctde   "algorithm=mappo_ctde" "task.pact_enabled=true"; }
+# The ceiling compensates with the TRUE deflection, so the environment it sees is
+# stationary and memory would buy it nothing -- MLP on purpose, not to save time.
+arm_ceiling()     { launch ceiling     "algorithm=ippo" \
+                                       "task.pact_enabled=true" "task.pact_oracle=true"; }
 
-stage_arms() {
-  arm_blind_ippo
-  arm_blind_mappo
-  arm_blind_gru
-  arm_pact
-  arm_pact_ctde
-  arm_ceiling
-}
+# ---------------------------------------------------------------------------
+# RECURRENT arms (expensive).  Run these only after the memoryless ones show
+# which host wins, and only if beta comes out phase-blind (flat across the
+# cycle), which is the one thing recurrence is there to fix.
+#
+# BenchMARL sets sequence_length = collected_frames_per_batch / n_envs_per_worker
+# and unrolls it in a Python loop, so the default 10 workers means a 600-step
+# unroll per optimizer step.  Use
+#     EXTRA="experiment.on_policy_n_envs_per_worker=100"
+# to make each sequence exactly one 60-step episode: ~10x faster and no
+# sequence straddles an episode boundary.
+# ---------------------------------------------------------------------------
+arm_blind_gru()     { launch blind_gru     "algorithm=ippo" "model=layers/gru"; }
+arm_pact_gru()      { launch pact_gru      "algorithm=ippo" "model=layers/gru" \
+                                           "task.pact_enabled=true"; }
+arm_pact_ctde_gru() { launch pact_ctde_gru "algorithm=mappo_ctde" "model=layers/gru" \
+                                           "task.pact_enabled=true"; }
+
+ARMS_MEMORYLESS=(blind_ippo blind_mappo pact_ippo pact_mappo pact_ctde ceiling)
+ARMS_RECURRENT=(blind_gru pact_gru pact_ctde_gru)
+
+stage_arms_fast() { for a in "${ARMS_MEMORYLESS[@]}"; do "arm_$a"; done; }
+stage_arms_rnn()  { for a in "${ARMS_RECURRENT[@]}";  do "arm_$a"; done; }
+stage_arms()      { stage_arms_fast; stage_arms_rnn; }
 
 stage_report() {
   local args=(--b0 "$(require_ckpt b0 b0)")
   local any=0
-  for name in blind_ippo blind_mappo blind_gru pact pact_ctde ceiling; do
+  for name in "${ARMS_MEMORYLESS[@]}" "${ARMS_RECURRENT[@]}"; do
     if ckpt="$(latest_ckpt "$RUNS/$name" 2>/dev/null)"; then
       args+=(--arm "$name=$ckpt")
       any=1
@@ -185,15 +209,17 @@ stage_n1() {
 mkdir -p "$RUNS"
 
 case "${1:-all}" in
-  check)  stage_check ;;
-  b0)     stage_b0 ;;
-  phase1) stage_phase1 ;;
-  arms)   stage_arms ;;
-  arm)    "arm_${2:?usage: run_pipeline.sh arm <name>}" ;;
-  report) stage_report ;;
-  n1)     stage_n1 ;;
-  all)    stage_check; stage_b0; stage_phase1; stage_arms; stage_report ;;
-  *)      fail "unknown stage '${1}' (check|b0|phase1|arms|arm|report|n1|all)" ;;
+  check)     stage_check ;;
+  b0)        stage_b0 ;;
+  phase1)    stage_phase1 ;;
+  arms-fast) stage_arms_fast ;;    # memoryless only -- a complete result on its own
+  arms-rnn)  stage_arms_rnn ;;     # the recurrent tier
+  arms)      stage_arms ;;
+  arm)       "arm_${2:?usage: run_pipeline.sh arm <name>}" ;;
+  report)    stage_report ;;
+  n1)        stage_n1 ;;
+  all)       stage_check; stage_b0; stage_phase1; stage_arms_fast; stage_report ;;
+  *)         fail "unknown stage '${1}' (check|b0|phase1|arms-fast|arms-rnn|arms|arm|report|n1|all)" ;;
 esac
 
 log "done: ${1:-all}"

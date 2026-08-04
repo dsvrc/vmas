@@ -254,12 +254,29 @@ Opt in with `DEVICE=cuda`, `FRAMES=…`, `LOGGERS=…`, or `EXTRA="…"`, which 
 to every arm at once.
 
 ```bash
-bash pact/run_pipeline.sh check     # unit tests + calibration + smoke test  (~2 min, no GPU)
-bash pact/run_pipeline.sh b0        # the baseline every later stage needs
-bash pact/run_pipeline.sh phase1    # certify sigma*                         (~10 min)
-bash pact/run_pipeline.sh arms      # the 6 training arms
-bash pact/run_pipeline.sh report    # the final table
+bash pact/run_pipeline.sh check      # unit tests + calibration + smoke test  (~2 min, no GPU)
+bash pact/run_pipeline.sh b0         # the baseline every later stage needs
+bash pact/run_pipeline.sh phase1     # certify sigma*                         (~10 min)
+bash pact/run_pipeline.sh arms-fast  # the 6 memoryless arms -- a complete result
+bash pact/run_pipeline.sh report     # the final table
+bash pact/run_pipeline.sh arms-rnn   # the recurrent tier, only if beta is phase-blind
 ```
+
+**PACT needs no recurrence.** The mechanism is env-side and the host is
+untouched, so `arms-fast` (all MLP: `blind_ippo`, `blind_mappo`, `pact_ippo`,
+`pact_mappo`, `pact_ctde`, `ceiling`) is a complete blind-vs-PACT-vs-ceiling
+result on its own. What a memoryless policy cannot do is modulate β with the
+driver phase; it settles on one constant gain — the constant-β tier. Run
+`arms-rnn` only once `pact/beta_peak` vs `pact/beta_trough` shows β is flat,
+which is the one thing recurrence exists to fix.
+
+> **If you do run the recurrent arms, widen the batch.** BenchMARL sets
+> `sequence_length = collected_frames_per_batch / n_envs_per_worker` and unrolls
+> it in a Python loop, so the default 10 workers give a 600-step unroll per
+> optimizer step (~405k `GRUCell` calls per training iteration).
+> `EXTRA="experiment.on_policy_n_envs_per_worker=100"` makes each sequence
+> exactly one 60-step episode: ~10× faster, and no sequence straddles an episode
+> boundary. Apply it to *every* arm, not just the recurrent ones.
 
 `arms` skips any arm that already has a checkpoint, so it is safe to re-run after
 an interruption, and `bash pact/run_pipeline.sh arm pact` runs a single arm. The
