@@ -443,7 +443,7 @@ class PactMixin(SlcMixin):
             g_now=self._slc_g_agent,
             alive=self._slc_alive,
         )
-        actions = torch.stack([a.action.u for a in agents], dim=1)
+        actions = torch.stack([a.action.u for a in self.world.agents], dim=1)
         delta, clipped = self.pact.compensate(actions, out["c_hat"])
         self._pact_delta = delta
         self._pact_clip = clipped.to(self._pact_clip.dtype)

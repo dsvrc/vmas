@@ -98,8 +98,9 @@ construction" holds verbatim.
 agent coupled to one co-channel peer and nobody else. `0.25` is the ordinary
 *partially overlapping* 2.4 GHz picture — the unplanned channel map every
 warehouse actually has — and it is what gives `W` five live peers spanning 16×
-before the duty spread. Measured spread `std/mean = 0.87` against POWER's 1.35,
-asymmetry 0.55.
+before the duty spread. Measured spread `std/mean = 0.54` against POWER's 1.35,
+asymmetry 0.34 — flatter than POWER, because a partially overlapping plan
+couples every peer rather than one.
 
 **`harm_gain` is pinned to exactly 1.0 by an anchor, not tuned.** A control loop
 gets its setpoints through only in the channel's idle fraction, so the delivered
@@ -114,8 +115,8 @@ measurement in `calibrate.py` §0.
    the whole driver domain (verified bit-exactly), which is what B.1.1 actually
    requires. Stock VMAS is recovered byte for byte by `slc_harm_enabled=false`,
    and that is the separate `b0` arm.
-2. **The coordination gap is essentially flat in `sigma`** (64.1% → 63.8% →
-   63.5% at σ = 0.5/1.0/1.5), where POWER's grew 6.3 → 9.5 → 12.7. This is
+2. **The coordination gap is essentially flat in `sigma`** (66.8% → 66.6% →
+   66.3% at σ = 0.5/1.0/1.5), where POWER's grew 6.3 → 9.5 → 12.7. This is
    structural, not a defect: `1/g` is a *common factor* on `u_i`, so it scales
    every contributor equally and cannot shift their shares. The knobs that widen
    the gap here are **N** and the **frequency plan**, and both behave as C.4
@@ -139,11 +140,11 @@ move it**. At the shipped defaults (N=6, 3 channels, σ=1):
 
 ```
              irreducible      own (free)      PEER (coordination)
-SLC              14.2%           22.0%              63.8%
+SLC              14.5%           18.9%              66.6%
 POWER            13.6%           76.9%               9.5%
 ```
 
-**The coordination gap is 6.7× POWER's**, and the reason is structural rather
+**The coordination gap is 7.0× POWER's**, and the reason is structural rather
 than tuned: contention on a shared channel is caused by other people's traffic,
 whereas grid loading is dominated by the agent's own injection.
 
@@ -151,11 +152,11 @@ C.4's falsifiable prediction — the gap grows with N — measured with no train
 
 ```
 N          1       3       6       9      12
-PEER    0.0%   49.0%   63.8%   71.8%   75.1%
+PEER    0.0%   50.6%   66.6%   73.3%   76.2%
 ```
 
 and from the other side, more channels means fewer co-channel peers and a smaller
-gap (`n_chan` 2 → 6 takes it 71.3% → 54.2%). No competing credit-assignment
+gap (`n_chan` 2 → 6 takes it 71.1% → 54.8%). No competing credit-assignment
 method predicts either direction.
 
 ---
@@ -219,7 +220,7 @@ and corrupt the coefficient the inverse depends on.
 `mode="delta"` makes every term a correction to the *measured* stale loading, so
 §6.4's pedestal problem disappears by construction rather than needing a slow
 EMA. `mode="level"` implements §6.4 as written and is in the ablation table; it
-measured **6.6× worse** loading error on the surrogate.
+measured **7.2× worse** loading error on the surrogate.
 
 ### 4.3 The floor property
 
@@ -234,29 +235,40 @@ which is stronger than *never worse than blind*.
 ## 5. Phase 0 — what the surrogate settled, and what it did not
 
 ```bash
-python pact2/selfcheck.py     # 21 arithmetic checks, ~90 s
-python pact2/ceiling.py       # Part C
-python pact2/calibrate.py     # the sweeps
+python pact2/check_plumbing.py   # run this FIRST -- see below
+python pact2/selfcheck.py        # 21 arithmetic checks, ~90 s
+python pact2/ceiling.py          # Part C
+python pact2/calibrate.py        # the sweeps
 ```
+
+> **Phase 0 reads the dataclass defaults; training reads the yaml.** The first
+> full Phase-0 pass here was measured at `aclr = 1e-3` (the dataclass default)
+> while the shipped task ran at `0.25` (the yaml) — so every Part C number
+> described an environment that never trains, and **nothing looked wrong**: the
+> tables were self-consistent and every check passed. It surfaced only when the
+> operator banner printed a different spread on the training machine.
+> `check_plumbing.py` now asserts the two agree, field by field, and refuses to
+> pass if it compared fewer keys than exist. Run it first, always.
 
 **Settled:**
 
 | question | measured |
 |---|---|
-| does the dial hurt (G3)? | blind reaches its waypoint **22.0% less often** than stock VMAS |
-| does the `ff` arm need peers? | no — it recovers **72.5%** of that with local information alone |
-| does the peer term add anything? | it cuts the residual loading error a further **12.6%** at N=6 |
-| does that margin widen with N? | **yes: 12.6% at N=6, 17.4% at N=12** — the direction the ceiling predicts |
+| does the dial hurt (G3)? | blind reaches its waypoint **21.7% less often** than stock VMAS |
+| does the `ff` arm need peers? | no — it recovers **73.3%** of that with local information alone |
+| does the peer term add anything? | it cuts the residual loading error a further **19.3%** at N=6 |
+| does that margin widen with N? | **yes: 19.3% at N=6, 20.8% at N=12** — the direction the ceiling predicts |
 | `mu`? | **0.99**, not POWER's 0.9995. The peer signal here is velocity, which moves fast; the optimum follows the drift rate, exactly as the spec says to expect |
 | `max_trust`? | interior optimum at **0.8** in loading error, degrading by 1.5 — this is the shipped default and the Phase-1 sweep's initialisation |
-| is the inverse usable inside the action set? | at `u_nominal=0.30`: `sat_frac` 0.28, `delta_clip_frac` **0.00**. At 0.5 it is 0.71/0.34 and the correction becomes a constant bias |
+| is the inverse usable inside the action set? | at `u_nominal=0.30`: `sat_frac` 0.27, `delta_clip_frac` **0.00**. At 0.5 it is 0.69/0.32 and the correction becomes a constant bias |
 | capacity cost (D.2) | σ=1 removes **10.9%** of mean capacity with a 1.687× swing; `slc_mean_preserve=true` leaves −2.1% and measurably outperforms |
 
 **Not settled, and do not quote otherwise:**
 
 - **The task metric is flat between `ff` and `pact` on the surrogate.** It runs a
   fixed high-gain servo, so a better loading estimate barely changes the command
-  it issues. The *mechanism* is measurable here; whether it moves **return** is a
+  it issues. The *mechanism* is measurable here (`u_err` −19.3% at N=6, −20.8%
+  at N=12, widening as the ceiling predicts); whether it moves **return** is a
   learning question and needs the real environment.
 - **The `max_trust` optimum above is an estimation optimum, not the T4 return
   inverted-U.** It is a defensible initialisation for the Phase-1 sweep, which
@@ -364,7 +376,7 @@ exposes the torchrl-dependent wiring lazily.
    contention effects (backoff dynamics, capture) are not modelled.
 5. **Trust is not learned**, only well-initialised and gated.
 6. **`theta` may be predictable without being decomposable.** Measured
-   `cond = 98.5`; report it before claiming to identify anything.
+   `cond = 123.3`; report it before claiming to identify anything.
 7. **Excitation dies** in converging domains. `cond` rising over training is the
    default, not an edge case — and it is what arms the two failure modes the
    surrogate cannot reproduce.

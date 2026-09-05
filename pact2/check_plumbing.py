@@ -56,6 +56,76 @@ for y in sorted(Path("benchmarl/conf/task/vmas_slc").glob("*.yaml")):
     report(f"{y.name} keys with no dataclass field", ykeys - dkeys)
     report(f"{y.name} dataclass fields with no yaml value", dkeys - ykeys)
 
+
+# ---------------------------------------------------------------------------
+#  Dataclass defaults must equal the shipped yaml.
+#
+#  Phase 0 (ceiling.py, calibrate.py, selfcheck.py) constructs SlcParams and
+#  PactParams directly and therefore reads the DATACLASS defaults; training
+#  reads the YAML.  When those diverge the calibration is measured against a
+#  different environment than the one that trains, and nothing looks wrong --
+#  it happened once here, with aclr 1e-3 vs 0.25, and it silently invalidated
+#  every Part C number.
+# ---------------------------------------------------------------------------
+
+# pact_enabled is the ARM SWITCH: False in the yaml so the default task is
+# blind, True in the dataclass so a hand-built compensator is usable.  The
+# disagreement is the point.
+#   pact_trace_gate_p0 is a constant of the trace-gate ablation and has no yaml
+#   entry at all -- it exists to reproduce a failure, not to be tuned.
+DEFAULT_EXEMPT = {"pact_enabled", "pact_trace_gate_p0"}
+
+
+def _parse(text):
+    out = {}
+    for key, raw in re.findall(r"^([a-z0-9_]+):\s*([^\s#]+)", text, re.M):
+        v = raw.strip()
+        if v in ("true", "True", "false", "False"):
+            out[key] = v.lower() == "true"
+        else:
+            try:
+                out[key] = float(v)
+            except ValueError:
+                out[key] = v
+    return out
+
+
+yaml_vals = _parse(Path("benchmarl/conf/task/vmas_slc/sampling.yaml").read_text())
+defaults = {}
+for prefix, cls in (("slc_", slc.SlcParams), ("pact_", pact.PactParams)):
+    for f in dataclasses.fields(cls):
+        if f.init and f.default is not dataclasses.MISSING:
+            defaults[prefix + f.name] = f.default
+
+mismatched = []
+compared = 0
+for key, want in sorted(defaults.items()):
+    if key in DEFAULT_EXEMPT or key not in yaml_vals:
+        continue
+    compared += 1
+    got = yaml_vals[key]
+    same = (
+        abs(got - want) < 1e-12
+        if isinstance(want, (int, float))
+        and not isinstance(want, bool)
+        and isinstance(got, (int, float))
+        else got == want
+    )
+    if not same:
+        mismatched.append(f"{key}: dataclass={want!r} yaml={got!r}")
+# A comparison that silently matched nothing would pass vacuously, which is the
+# same failure one level up.
+expected = len(defaults) - len(DEFAULT_EXEMPT)
+if compared < expected:
+    mismatched.append(
+        f"only {compared}/{expected} defaults were compared -- the yaml parse "
+        "missed keys, so this check would pass vacuously"
+    )
+report(
+    f"dataclass defaults that disagree with sampling.yaml ({compared} compared)",
+    mismatched,
+)
+
 print()
 print("PLUMBING OK" if not problems else f"PROBLEMS in {len(problems)} place(s)")
 raise SystemExit(1 if problems else 0)

@@ -121,11 +121,22 @@ class SlcParams:
     B.1.3 for D.2's slack condition.  Off by default; report G4a either way."""
 
     # --- the medium ---------------------------------------------------------
-    n_chan: int = 4
+    n_chan: int = 3
     """Channels in the deployment's frequency plan."""
-    aclr: float = 1e-3
-    """Adjacent-channel leakage ratio, per hop (-30 dB).  This is what gives the
-    operator its orders-of-magnitude spread."""
+    aclr: float = 0.25
+    """Spectral overlap between channels one hop apart.
+
+    ``0.25`` is the ordinary *partially overlapping* 2.4 GHz picture -- the
+    unplanned channel map every warehouse actually has -- not the -30 dB
+    adjacent-channel rejection of a clean orthogonal plan.  A clean plan would
+    leave each agent coupled to its co-channel peers and nobody else, which
+    makes the peer basis effectively rank-one; this keeps every peer live with
+    genuinely different weights, which is what the basis needs.
+
+    **These defaults must equal the shipped yaml.**  ``pact2/check_plumbing.py``
+    asserts it: Phase 0 reads the dataclass while training reads the yaml, so a
+    divergence means the calibration was measured against a different
+    environment than the one that trains.  That happened once, silently."""
     leak_span: int = 2
     """Channels beyond which leakage is exactly zero."""
     duty_lo: float = 0.7
@@ -148,7 +159,7 @@ class SlcParams:
     """``scaled``: ``K^0`` provisioned for the fleet size (default).
     ``fixed``: ``K^0`` provisioned for ``capacity_ref_agents`` regardless of N,
     so adding robots really does congest the medium."""
-    capacity_ref_agents: int = 4
+    capacity_ref_agents: int = 6
 
     # --- the exertion functional Phi ---------------------------------------
     phi_floor: float = 0.25

@@ -102,18 +102,27 @@ PACT_DEFAULTS: Dict = dict(
     pact_u_cap=3.0,
 )
 
-SAMPLING = dict(
-    n_agents=NAG,
-    shared_rew=False,
-    n_gaussians=3,
-    lidar_range=0.2,
-    cov=0.05,
-    collisions=True,
-    spawn_same_pos=False,
-)
+def sampling_kwargs(n_agents: int) -> Dict:
+    # Built per call, NOT frozen at import: a module-level dict capturing NAG
+    # once made the N=1 certificate silently run a six-agent world.
+    return dict(
+        n_agents=n_agents,
+        shared_rew=False,
+        n_gaussians=3,
+        lidar_range=0.2,
+        cov=0.05,
+        collisions=True,
+        spawn_same_pos=False,
+    )
 
 
-def make(stock: bool = False, pact: bool = False, seed: int = 0, **over):
+def make(
+    stock: bool = False,
+    pact: bool = False,
+    seed: int = 0,
+    n_agents: int = NAG,
+    **over,
+):
     """Build an env.  ``stock=True`` gives unmodified ``vmas/sampling``."""
     if stock:
         return vmas.make_env(
@@ -122,7 +131,7 @@ def make(stock: bool = False, pact: bool = False, seed: int = 0, **over):
             device=DEV,
             continuous_actions=True,
             seed=seed,
-            **SAMPLING,
+            **sampling_kwargs(n_agents),
         )
     kw = dict(SLC_DEFAULTS)
     kw.update(PACT_DEFAULTS)
@@ -134,17 +143,19 @@ def make(stock: bool = False, pact: bool = False, seed: int = 0, **over):
         device=DEV,
         continuous_actions=True,
         seed=seed,
-        **SAMPLING,
+        **sampling_kwargs(n_agents),
         **kw,
     )
 
 
-def fixed_actions(steps: int, seed: int = 123) -> List[List[torch.Tensor]]:
+def fixed_actions(
+    steps: int, seed: int = 123, n_agents: int = NAG
+) -> List[List[torch.Tensor]]:
     """One action sequence, reused across arms.  Severity must be the only
     variable; a fresh sample per arm would make every comparison noise."""
     g = torch.Generator().manual_seed(seed)
     return [
-        [torch.rand(NENV, 2, generator=g) * 2 - 1 for _ in range(NAG)]
+        [torch.rand(NENV, 2, generator=g) * 2 - 1 for _ in range(n_agents)]
         for _ in range(steps)
     ]
 
@@ -279,19 +290,21 @@ def _g7():
 
 @check("G1 N=1: the peer sum is empty, so the cross-agent term is exactly zero")
 def _g1():
-    global NAG
-    old = NAG
-    try:
-        NAG = 1
-        env = make(**{})
-        op = env.scenario.slc_op
-        assert float(op.W.abs().max()) == 0.0, "W is non-zero at N=1"
-        env.reset(seed=0)
-        for _ in range(20):
-            env.step([torch.rand(NENV, 2) * 2 - 1])
-    finally:
-        NAG = old
-    return "W is the empty operator; irreducibility is structural"
+    env = make(n_agents=1)
+    op = env.scenario.slc_op
+    assert op.W.shape == (1, 1), f"expected a 1x1 operator, got {tuple(op.W.shape)}"
+    assert float(op.W.abs().max()) == 0.0, "W is non-zero at N=1"
+    env.reset(seed=0)
+    u = []
+    for _ in range(20):
+        _, _, _, info = env.step([torch.rand(NENV, 2) * 2 - 1])
+        u.append(info[0]["slc_u"])
+    mean_u = float(torch.stack(u).mean())
+    return (
+        f"1x1 empty operator; the lone agent still feels the dial through its "
+        f"OWN term (mean u {mean_u:.3f}) -- the certificate is that the "
+        "CROSS-AGENT contribution is zero, not that the task is unchanged"
+    )
 
 
 @check("PACT widens the interface by ONE observation feature and ZERO actions")

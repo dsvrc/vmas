@@ -252,7 +252,7 @@ def main() -> int:
         "5. STRUCTURAL ABLATIONS.",
         "   r=2          : after per-channel normalisation both columns collapse\n"
         "                  to a weighted mean and go near-collinear.\n"
-        "   N=12 vs ff   : the coordination gap is 75% at N=12 against 64% at\n"
+        "   N=12 vs ff   : the coordination gap is 76% at N=12 against 67% at\n"
         "                  N=6, so the ff -> pact margin should widen.\n"
         "\n"
         "   NOT here: the trace gate and the covariance-windup collapse are\n"
