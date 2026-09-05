@@ -78,14 +78,33 @@ case "${1:-}" in
     python pact2/calibrate.py --csv "${OUT}/calibration.csv"
     ;;
   smoke)
-    python pact2/smoke_test.py
+    # All three: the observation and info paths differ per scenario, so passing
+    # on one says nothing about the others.
+    for s in sampling discovery navigation; do
+      python pact2/smoke_test.py --scenario "${s}"
+    done
+    ;;
+  probe)
+    # PACT_PIPELINE_SPEC 11.5: verify the banner and delta_nonzero_frac on a
+    # SHORT run before any long one.  Three collection iterations is enough to
+    # see whether the method is on at all.
+    run_arm probe task.pact_enabled=true \
+      experiment.max_n_frames=18000 \
+      experiment.evaluation=false \
+      experiment.checkpoint_at_end=false
     ;;
   certify)
     # Commit this output BEFORE running any method.  The history is the
     # evidence that the environment was not retuned after seeing a method fail.
     mkdir -p "${OUT}"
-    { python pact2/check_plumbing.py; python pact2/selfcheck.py; python pact2/ceiling.py; python pact2/smoke_test.py; } \
-      | tee "${OUT}/certificates.txt"
+    {
+      python pact2/check_plumbing.py
+      python pact2/selfcheck.py
+      python pact2/ceiling.py
+      for s in sampling discovery navigation; do
+        python pact2/smoke_test.py --scenario "${s}"
+      done
+    } | tee "${OUT}/certificates.txt"
     echo "wrote ${OUT}/certificates.txt -- git add it now"
     ;;
   b0)       arm_b0 ;;

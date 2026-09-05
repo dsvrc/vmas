@@ -31,20 +31,21 @@ import vmas  # noqa: E402
 from benchmarl.environments.vmas_slc.scenario import make_slc_scenario  # noqa: E402
 from benchmarl.environments.vmas_slc.slc_core import SHIFT_QUIET  # noqa: E402
 
-RESULTS: List[Tuple[str, bool, str]] = []
 DEV = "cpu"
 NENV = 4
 NAG = 6
 
+#: Registered, not run: the checks need the --scenario argument, so they are
+#: collected at import and executed from main() once argv has been parsed.
+CHECKS: List[Tuple[str, Callable[[], str]]] = []
+
+#: Set by main().  Every check reads it through make().
+SCENARIO = "sampling"
+
 
 def check(name: str):
     def wrap(fn: Callable[[], str]):
-        try:
-            RESULTS.append((name, True, fn() or ""))
-        except AssertionError as exc:
-            RESULTS.append((name, False, str(exc)))
-        except Exception as exc:  # noqa: BLE001
-            RESULTS.append((name, False, f"{type(exc).__name__}: {exc}"))
+        CHECKS.append((name, fn))
         return fn
 
     return wrap
@@ -102,18 +103,44 @@ PACT_DEFAULTS: Dict = dict(
     pact_u_cap=3.0,
 )
 
-def sampling_kwargs(n_agents: int) -> Dict:
-    # Built per call, NOT frozen at import: a module-level dict capturing NAG
-    # once made the N=1 certificate silently run a six-agent world.
-    return dict(
-        n_agents=n_agents,
-        shared_rew=False,
-        n_gaussians=3,
-        lidar_range=0.2,
-        cov=0.05,
-        collisions=True,
-        spawn_same_pos=False,
-    )
+def scenario_kwargs(n_agents: int) -> Dict:
+    """The stock task's own kwargs, matching the shipped yaml.
+
+    Built per call, NOT frozen at import: a module-level dict capturing ``NAG``
+    once made the N=1 certificate silently run a six-agent world.
+    """
+    if SCENARIO == "sampling":
+        return dict(
+            n_agents=n_agents,
+            shared_rew=False,
+            n_gaussians=3,
+            lidar_range=0.2,
+            cov=0.05,
+            collisions=True,
+            spawn_same_pos=False,
+        )
+    if SCENARIO == "discovery":
+        return dict(
+            n_agents=n_agents,
+            n_targets=7,
+            lidar_range=0.35,
+            covering_range=0.25,
+            agents_per_target=min(2, n_agents),
+            targets_respawn=True,
+            shared_reward=True,
+        )
+    if SCENARIO == "navigation":
+        return dict(
+            n_agents=n_agents,
+            collisions=True,
+            agents_with_same_goal=1,
+            observe_all_goals=False,
+            shared_rew=False,
+            split_goals=False,
+            lidar_range=0.35,
+            agent_radius=0.1,
+        )
+    raise ValueError(f"unknown scenario {SCENARIO!r}")
 
 
 def make(
@@ -123,27 +150,27 @@ def make(
     n_agents: int = NAG,
     **over,
 ):
-    """Build an env.  ``stock=True`` gives unmodified ``vmas/sampling``."""
+    """Build an env.  ``stock=True`` gives the unmodified stock scenario."""
     if stock:
         return vmas.make_env(
-            scenario="sampling",
+            scenario=SCENARIO,
             num_envs=NENV,
             device=DEV,
             continuous_actions=True,
             seed=seed,
-            **sampling_kwargs(n_agents),
+            **scenario_kwargs(n_agents),
         )
     kw = dict(SLC_DEFAULTS)
     kw.update(PACT_DEFAULTS)
     kw["pact_enabled"] = pact
     kw.update(over)
     return vmas.make_env(
-        scenario=make_slc_scenario("sampling", pact),
+        scenario=make_slc_scenario(SCENARIO, pact),
         num_envs=NENV,
         device=DEV,
         continuous_actions=True,
         seed=seed,
-        **sampling_kwargs(n_agents),
+        **scenario_kwargs(n_agents),
         **kw,
     )
 
@@ -181,7 +208,7 @@ def roll(env, actions) -> Dict[str, torch.Tensor]:
 # =============================================================================
 
 
-@check("1 slc_harm_enabled=false reproduces stock vmas/sampling STEP FOR STEP")
+@check("1 slc_harm_enabled=false reproduces the stock scenario STEP FOR STEP")
 def _stock():
     acts = fixed_actions(60)
     a = roll(make(stock=True), acts)
@@ -197,11 +224,13 @@ def _stock():
 
 @check("2 reward is inherited, never reshaped")
 def _reward_untouched():
-    from vmas.scenarios.sampling import Scenario as Stock
+    import importlib
+
+    Stock = importlib.import_module(f"vmas.scenarios.{SCENARIO}").Scenario
 
     from benchmarl.environments.vmas_slc import scenario as mod
 
-    cls = type(make_slc_scenario("sampling", True))
+    cls = type(make_slc_scenario(SCENARIO, True))
     for name in ("reward", "done"):
         assert getattr(cls, name) is getattr(Stock, name), (
             f"{name} was overridden.  The agent must earn less strictly because "
@@ -309,12 +338,16 @@ def _g1():
 
 @check("PACT widens the interface by ONE observation feature and ZERO actions")
 def _interface():
+    def width(env) -> int:
+        o = env.reset()[0]
+        # some scenarios return a dict observation; the sensor is one feature
+        # either way
+        return sum(v.shape[-1] for v in o.values()) if isinstance(o, dict) else o.shape[-1]
+
     blind = make(pact=False, slc_observe_loading=False)
     slc = make(pact=False, slc_observe_loading=True)
     pact = make(pact=True, slc_observe_loading=True)
-    o_b = blind.reset()[0].shape[-1]
-    o_s = slc.reset()[0].shape[-1]
-    o_p = pact.reset()[0].shape[-1]
+    o_b, o_s, o_p = width(blind), width(slc), width(pact)
     assert o_s == o_b + 1, f"observation grew by {o_s - o_b}, expected 1"
     assert o_p == o_s, "PACT changed the observation; the host must be untouched"
     a_s = slc.get_agent_action_size(slc.agents[0])
@@ -409,21 +442,46 @@ def _info():
 
 
 def main() -> int:
+    global SCENARIO
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.parse_args()
+    ap.add_argument(
+        "--scenario",
+        default="sampling",
+        choices=["sampling", "discovery", "navigation"],
+        help="which stock task to plant SLC into.  Run all three: the "
+        "observation and info paths differ per scenario, so passing on one "
+        "says nothing about the others.",
+    )
+    args = ap.parse_args()
+    SCENARIO = args.scenario
+
     width = 78
     print("=" * width)
     print("SLC / PACT smoke test   (needs vmas; run this on the training machine)")
-    print(f"vmas {vmas.__version__}   torch {torch.__version__}")
+    print(f"scenario {SCENARIO}   vmas {vmas.__version__}   torch {torch.__version__}")
     print("=" * width)
+
+    results = []
+    for name, fn in CHECKS:
+        try:
+            results.append((name, True, fn() or ""))
+        except AssertionError as exc:
+            results.append((name, False, str(exc)))
+        except Exception as exc:  # noqa: BLE001
+            import traceback
+
+            results.append(
+                (name, False, f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+            )
+
     failed = 0
-    for name, ok, detail in RESULTS:
+    for name, ok, detail in results:
         failed += 0 if ok else 1
         print(f"[{'PASS' if ok else 'FAIL'}] {name}")
         if detail:
             print(f"       {detail}")
     print("-" * width)
-    print(f"{len(RESULTS) - failed}/{len(RESULTS)} checks passed")
+    print(f"{len(results) - failed}/{len(results)} checks passed  [{SCENARIO}]")
     return 1 if failed else 0
 
 
