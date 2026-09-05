@@ -4,7 +4,10 @@
 #      bash pact2/run_pipeline.sh check     # arithmetic + Phase 0, no GPU, ~3 min
 #      bash pact2/run_pipeline.sh smoke     # wiring, needs vmas, ~1 min
 #      bash pact2/run_pipeline.sh certify   # the Part D gate output -- COMMIT IT
-#      bash pact2/run_pipeline.sh arms      # the training ladder
+#      bash pact2/run_pipeline.sh probe     # 18k frames, is the method ON at all
+#      bash pact2/run_pipeline.sh arms      # the ladder, one algorithm
+#      bash pact2/run_pipeline.sh matrix    # the ladder x every continuous algo
+#      bash pact2/run_pipeline.sh discrete  # qmix/vdn/iql, blind only -- see below
 #      bash pact2/run_pipeline.sh arm pact  # a single arm
 #
 #  Every arm inherits ONE shared block of overrides.  If those differ between
@@ -25,7 +28,15 @@ DEVICE="${DEVICE:-cpu}"
 SEED="${SEED:-0}"
 LOGGERS="${LOGGERS:-[csv]}"
 EXTRA="${EXTRA:-}"
-OUT="${OUT:-runs/slc}"
+#  Task, algorithm AND seed in the path.  Two runs sharing a folder is how a
+#  comparison silently becomes a comparison of the wrong things -- and since
+#  run_arm skips any arm that already has checkpoints, a second seed written to
+#  the first seed's folder is not overwritten, it is SKIPPED, with no error.
+OUT="${OUT:-runs/slc/${TASK##*/}_${ALGO}_s${SEED}}"
+
+#  The continuous algorithms.  qmix/vdn/iql are discrete-only and get their own
+#  stage -- see `discrete` below.
+ALGOS="${ALGOS:-ippo mappo iddpg maddpg isac}"
 
 COMMON=(
   "task=${TASK}"
@@ -123,6 +134,32 @@ case "${1:-}" in
     for n in 3 6 9 12; do
       run_arm "n_${n}" task.pact_enabled=true "task.n_agents=${n}"
       run_arm "n_${n}_ff" task.pact_enabled=true task.pact_mode=ff "task.n_agents=${n}"
+    done
+    ;;
+  matrix)
+    # The full ladder for every continuous algorithm.  Re-execs so ALGO is baked
+    # into COMMON and OUT consistently for each.
+    for algo in ${ALGOS}; do
+      echo "===================== algorithm ${algo} ====================="
+      ALGO="${algo}" OUT="runs/slc/${TASK##*/}_${algo}_s${SEED}" bash "$0" arms
+    done
+    ;;
+  discrete)
+    # qmix/vdn/iql.  BLIND ONLY by default: at nvec=3 every non-zero command is
+    # already on the action box, so PACT's inverse is lost to the rail and the
+    # arm would report a constant bias as a compensation.  Run
+    # `bash pact2/run_pipeline.sh discrete-pact` for the nvec=9 version, and
+    # read slc/sat_frac before believing either.
+    for algo in ${DISCRETE_ALGOS:-qmix}; do
+      echo "===================== algorithm ${algo} (discrete) ====================="
+      ALGO="${algo}" OUT="runs/slc/${TASK##*/}_${algo}_s${SEED}" bash "$0" arm b0
+      ALGO="${algo}" OUT="runs/slc/${TASK##*/}_${algo}_s${SEED}" bash "$0" arm blind
+    done
+    ;;
+  discrete-pact)
+    for algo in ${DISCRETE_ALGOS:-qmix}; do
+      ALGO="${algo}" OUT="runs/slc/${TASK##*/}_${algo}_nvec9_s${SEED}" \
+        EXTRA="task.slc_discrete_nvec=9 ${EXTRA}" bash "$0" arms
     done
     ;;
   arm)

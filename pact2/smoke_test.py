@@ -375,6 +375,56 @@ def _floor():
     return f"gated-off identical; live PACT differs by {dl:.4e} (it is acting)"
 
 
+@check("discrete actions: the channel inverse survives the discretisation")
+def _discrete():
+    """QMIX/VDN/IQL are discrete-only.  The harm and its inverse live below the
+    action interface so the method is unchanged -- but at VMAS's default 3-way
+    grid every non-zero command already sits on the action box, so
+    ``a / (1 - c)`` is entirely lost to the rail.  Measure it, do not assume it.
+    """
+    out = []
+    for nvec in (3, 9):
+        env = vmas.make_env(
+            scenario=make_slc_scenario(SCENARIO, True),
+            num_envs=NENV,
+            device=DEV,
+            continuous_actions=False,
+            seed=0,
+            **scenario_kwargs(NAG),
+            **{**SLC_DEFAULTS, **PACT_DEFAULTS,
+               "pact_enabled": True, "slc_discrete_nvec": nvec},
+        )
+        assert env.agents[0].discrete_action_nvec == [nvec, nvec], (
+            f"discrete_action_nvec did not take: "
+            f"{env.agents[0].discrete_action_nvec}"
+        )
+        env.reset(seed=0)
+        sat = []
+        g = torch.Generator().manual_seed(4)
+        for _ in range(120):
+            acts = [
+                torch.randint(0, nvec**2, (NENV, 1), generator=g) for _ in env.agents
+            ]
+            _, _, _, info = env.step(acts)
+            sat.append(torch.stack([i["slc_sat"] for i in info], 1))
+        out.append((nvec, float(torch.stack(sat).mean())))
+
+    coarse, fine = out[0][1], out[1][1]
+    assert fine < coarse, (
+        f"finer discretisation did not reduce rail contact ({coarse:.2f} -> "
+        f"{fine:.2f}); slc_discrete_nvec is not reaching the action space"
+    )
+    return (
+        f"sat_frac  nvec=3: {coarse:.2f}   nvec=9: {fine:.2f}.  "
+        + (
+            "At nvec=3 the correction is mostly a constant bias -- run the "
+            "discrete arms blind-only, or with nvec>=9."
+            if coarse > 0.5
+            else "both usable."
+        )
+    )
+
+
 @check("config plumbing: every slc_/pact_ key really arrived at the scenario")
 def _plumbing():
     sc = make(pact=True).scenario

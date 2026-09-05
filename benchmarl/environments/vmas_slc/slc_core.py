@@ -193,6 +193,17 @@ class SlcParams:
     """``False`` recovers stock VMAS byte for byte -- the absolute reference
     B0, distinct from the ``sigma = 0`` stationary-contention task."""
 
+    # --- task shape (NOT the non-stationarity) ------------------------------
+    discrete_nvec: int = 3
+    """Levels per action component when a discrete algorithm is used.
+
+    Not part of the NS -- it is here only because it has to reach ``make_world``
+    with the rest of the task config.  VMAS's default is 3, which puts every
+    non-zero command on the action box and leaves the channel inverse nothing to
+    work with.  Raise it to 7 or 9 to give the discrete arms headroom, and
+    report ``slc/sat_frac`` either way.  Ignored entirely under continuous
+    actions."""
+
     # --- observation --------------------------------------------------------
     observe_loading: bool = True
     """Append the agent's own (one-step-stale) loading to its observation.

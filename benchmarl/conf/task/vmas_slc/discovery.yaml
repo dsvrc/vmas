@@ -98,6 +98,12 @@ slc_harm_at_nominal: 0.30    # ANCHOR, not a tuned knob: a control loop only
                              # and nothing more.
 slc_harm_cap: 0.85           # a robot never loses all authority
 slc_harm_enabled: true       # false recovers stock VMAS byte for byte (B0)
+slc_discrete_nvec: 3         # levels per action component, DISCRETE ARMS ONLY
+                             # (qmix/vdn/iql).  NOT part of the NS.  VMAS's
+                             # default 3 puts every non-zero command on the
+                             # action box, leaving the channel inverse nothing
+                             # to work with -- use 7 or 9 for a discrete PACT
+                             # arm, and report slc/sat_frac either way.
 slc_observe_loading: true    # A.4: the agent observes its OWN loading, one step
                              # stale.  That gap is the problem; a sensor that
                              # closed it would be an oracle.

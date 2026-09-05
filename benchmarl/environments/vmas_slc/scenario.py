@@ -80,6 +80,7 @@ SLC_KWARGS = (
     "slc_harm_at_nominal",
     "slc_harm_cap",
     "slc_harm_enabled",
+    "slc_discrete_nvec",
     "slc_observe_loading",
 )
 
@@ -159,6 +160,15 @@ class SlcMixin:
                     f"{world.dim_p}.  Wire a different channel before using a "
                     "non-holonomic scenario."
                 )
+
+        # Discrete arms only.  Set before Environment.__init__ reads it to build
+        # the action space; ignored under continuous actions.  action_size is
+        # untouched, so this cannot change the interface width.
+        nvec = int(self.slc_params.discrete_nvec)
+        if nvec < 2:
+            raise ValueError(f"slc_discrete_nvec must be >= 2, got {nvec}")
+        for a in agents:
+            a.discrete_action_nvec = [nvec] * a.action_size
 
         self.slc_op = build_operator(self.slc_params, n, device)
         self._slc_agent_index = {a.name: i for i, a in enumerate(agents)}

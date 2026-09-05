@@ -48,6 +48,7 @@ class SlcConfigBase:
     slc_harm_at_nominal: float = MISSING
     slc_harm_cap: float = MISSING
     slc_harm_enabled: bool = MISSING
+    slc_discrete_nvec: int = MISSING
     slc_observe_loading: bool = MISSING
 
     # --- the compensator (NEVER read by the dial) --------------------------

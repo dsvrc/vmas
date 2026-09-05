@@ -101,10 +101,24 @@ class VmasSlcClass(VmasClass):
         )
 
     def supports_discrete_actions(self) -> bool:
-        # The harm channel is a continuous gain on a continuous thrust vector and
-        # its inverse is continuous too (A.7).  A discretised action set would
-        # turn the channel inverse into a threshold and change the method.
-        return False
+        """Yes -- but read ``sat_frac`` before believing a discrete PACT arm.
+
+        A.7 says a *discrete channel* makes trust a threshold rather than a
+        scale.  That is about the **harm** being a permutation, and SLC's harm
+        is not: it is a continuous multiplicative gain on the force vector,
+        applied in ``process_action`` **below the action interface**.  The
+        policy's action set does not make the channel discrete, so the method is
+        unchanged and QMIX/VDN/IQL can run as ordinary arms.
+
+        What *does* change is whether the inverse fits.  At VMAS's default
+        3-way discretisation the policy commands land on ``{-u_range, 0,
+        +u_range}``, so ``a / (1 - c)`` for any non-zero command immediately
+        leaves the action box and the correction is lost to the rail -- a
+        rail-pinned delta is a constant bias, not a compensation.  Give the
+        discrete arms headroom with ``slc_discrete_nvec`` (7 or 9) and report
+        ``slc/sat_frac`` alongside the result, or run them blind-only.
+        """
+        return True
 
     @staticmethod
     def env_name() -> str:
