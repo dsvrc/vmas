@@ -1,0 +1,111 @@
+﻿====================================================================================================
+PHASE 0 -- calibration on the surrogate   (torch only, no simulator)
+====================================================================================================
+
+0. PROVISIONING.  The one number that trades G3 depth against whether
+   the channel inverse fits inside the action set.  harm_gain is pinned
+   to 1.0 by the anchor (delivered loop gain = channel idle fraction),
+   so u_nominal is the ONLY knob and it is chosen by measurement here.
+   Want: G3 depth large AND sat_frac low.  A correction that lives on
+   the action rail is a constant bias, not a compensation.
+
+     u_nominal  G3 depth  reached     u_err   delta   clip    sat   harm
+           0.2     14.0%   0.2509   0.00311  0.1075   0.00   0.09  24.6%
+           0.3     22.0%   0.2411   0.00447  0.2036   0.00   0.28  36.4%
+           0.4     30.2%   0.2217   0.00524  0.3355   0.16   0.55  46.7%
+           0.5     38.2%   0.1963   0.00551  0.4644   0.34   0.71  55.4%
+           0.6     46.3%   0.1705   0.00550  0.5744   0.65   0.79  62.6%
+
+1. THE LADDER.
+   'stock' is slc_harm_enabled=false: stock VMAS byte for byte, the
+   absolute reference B0.  'blind' is the same task under contention.
+   'ff' is the INFORMATION-MATCHED BASELINE -- it has the declared
+   operator, the driver model and its own stale sensor, everything PACT
+   has except peers' exertion.  The gap that matters is ff -> pact.
+
+           arm  reached  trk_err     u_err   trust   delta     peer       ff   clip    sat   harm
+         stock   0.2566   0.5252   0.00000   0.000  0.0000  0.00000  0.00000   0.00   0.00   0.0%  <- best
+         blind   0.2001   0.5690   0.00000   0.000  0.0000  0.00000  0.00000   0.00   0.00  34.1%
+            ff   0.2411   0.5436   0.00511   0.000  0.2035  0.00000  0.00019   0.00   0.28  36.4%
+          pact   0.2411   0.5435   0.00447   0.300  0.2036  0.00113  0.00019   0.00   0.28  36.4%
+     peer-only   0.2411   0.5436   0.00548   0.300  0.2033  0.00113  0.00000   0.00   0.27  36.4%
+    level-mode   0.2420   0.5431   0.02935   0.300  0.2114  0.00698  0.00019   0.00   0.28  36.5%
+
+2. THE T4 GAIN CAP.
+   Phi reads the EXECUTED motion, so compensating feeds the medium it
+   compensates against: a commons.  T4 predicts an INTERIOR optimum --
+   not zero, not one.  This sweep is EVIDENCE, not tuning: calibrate on
+   one seed and validate on held-out seeds, and report the whole curve.
+   Scored on u_err, the MECHANISM metric: the surrogate's fixed servo is
+   too insensitive for the task metric to resolve the difference, and a
+   flat task column here is a limit of the surrogate, not evidence of
+   no effect.
+
+     max_trust  reached  trk_err     u_err   trust   delta     peer       ff   clip    sat   harm
+             0   0.2411   0.5436   0.00511   0.000  0.2035  0.00000  0.00019   0.00   0.28  36.4%
+           0.1   0.2411   0.5436   0.00488   0.100  0.2035  0.00038  0.00019   0.00   0.28  36.4%
+           0.2   0.2411   0.5435   0.00466   0.200  0.2036  0.00075  0.00019   0.00   0.28  36.4%
+           0.3   0.2411   0.5435   0.00447   0.300  0.2036  0.00113  0.00019   0.00   0.28  36.4%
+           0.5   0.2411   0.5435   0.00416   0.500  0.2037  0.00188  0.00019   0.00   0.28  36.4%
+           0.8   0.2412   0.5435   0.00404   0.800  0.2039  0.00301  0.00019   0.00   0.28  36.4%  <- best
+             1   0.2412   0.5434   0.00420   1.000  0.2040  0.00376  0.00019   0.00   0.28  36.4%
+           1.5   0.2413   0.5433   0.00513   1.500  0.2044  0.00566  0.00019   0.00   0.28  36.4%
+             2   0.2414   0.5433   0.00651   2.000  0.2048  0.00756  0.00019   0.00   0.28  36.4%
+
+3. THE CONTRAST (A.6): the same sweep with the loop CUT.
+   slc_phi_reads_executed=false makes Phi read the policy's INTENDED
+   action, so pushing back is not pushing.  T4 is predicted NOT to apply
+   and the inverted-U should flatten.  Confirming a prediction of NO
+   EFFECT is worth more than a fifth environment where everything works.
+
+     max_trust  reached  trk_err     u_err   trust   delta     peer       ff   clip    sat   harm
+             0   0.2383   0.5468   0.00491   0.000  0.2160  0.00000  0.00019   0.01   0.29  37.0%
+           0.3   0.2383   0.5468   0.00432   0.300  0.2163  0.00112  0.00019   0.01   0.29  37.0%
+           0.8   0.2383   0.5467   0.00399   0.800  0.2168  0.00298  0.00019   0.01   0.30  37.0%
+           1.5   0.2384   0.5466   0.00513   1.500  0.2175  0.00559  0.00019   0.01   0.30  37.0%
+             2   0.2384   0.5466   0.00650   2.000  0.2181  0.00745  0.00019   0.02   0.30  37.0%  <- best
+
+4. THE FORGETTING FACTOR.
+   RE-MEASURE per environment; the optimum follows the drift rate.
+   Aggressive forgetting buys nothing and injects noise straight into
+   the coefficient the inverse depends on.
+
+            mu  reached  trk_err     u_err   trust   delta     peer       ff   clip    sat   harm
+          0.99   0.2411   0.5435   0.00447   0.300  0.2036  0.00113  0.00019   0.00   0.28  36.4%  <- best
+         0.995   0.2411   0.5435   0.00455   0.300  0.2036  0.00110  0.00019   0.00   0.28  36.4%
+         0.999   0.2411   0.5435   0.00466   0.292  0.2036  0.00106  0.00019   0.00   0.28  36.4%
+        0.9995   0.2411   0.5435   0.00468   0.285  0.2036  0.00105  0.00019   0.00   0.28  36.4%
+        0.9999   0.2411   0.5435   0.00469   0.282  0.2036  0.00104  0.00019   0.00   0.28  36.4%
+
+5. STRUCTURAL ABLATIONS.
+   r=2          : after per-channel normalisation both columns collapse
+                  to a weighted mean and go near-collinear.
+   N=12 vs ff   : the coordination gap is 75% at N=12 against 64% at
+                  N=6, so the ff -> pact margin should widen.
+
+   NOT here: the trace gate and the covariance-windup collapse are
+   EXCITATION-DEATH failures.  They bite only once a policy has
+   converged, and this surrogate runs a fixed servo that never stops
+   exciting -- a fixed-controller rollout would show them as no-ops and
+   silently bless the bug.  They are reproduced with excitation forced
+   off in pact2/selfcheck.py, and must be re-checked on the real
+   training curve late in the run.
+
+      ablation  reached  trk_err     u_err   trust   delta     peer       ff   clip    sat   harm
+          pact   0.2411   0.5435   0.00447   0.300  0.2036  0.00113  0.00019   0.00   0.28  36.4%
+           r=2   0.2411   0.5435   0.00450   0.300  0.2036  0.00116  0.00019   0.00   0.28  36.4%
+  mean-preserve   0.2460   0.5377   0.00402   0.300  0.1593  0.00104  0.00015   0.00   0.19  31.9%  <- best
+          N=12   0.2408   0.5492   0.00451   0.300  0.1943  0.00137  0.00018   0.00   0.25  35.6%
+       N=12 ff   0.2407   0.5492   0.00546   0.000  0.1941  0.00000  0.00018   0.00   0.25  35.6%
+
+----------------------------------------------------------------------------------------------------
+VERDICT (surrogate; the learning questions are still open)
+  G3, does the dial hurt?      blind reaches -22.0% as often as stock VMAS (0.257 -> 0.200)
+  ff arm recovers              72.5% of that, using LOCAL information only
+  pact recovers                72.5%
+  peer term cuts the residual loading error a further 12.6%
+  correction split             base+ff+own (local) vs peer (coordination) = 0.00019 / 0.00113 in loading units
+  T4 optimum at max_trust=2  <- at the sweep edge; either widen it or the commons term is too weak at this harm scale to bend the curve
+  loop cut (A.6 contrast)      optimum at max_trust=2; T4 is predicted NOT to apply here
+
+wrote 35 rows to runs\slc_calibration.csv
