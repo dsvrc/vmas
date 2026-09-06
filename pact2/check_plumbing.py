@@ -46,7 +46,19 @@ report("PACT_KWARGS with no matching PactParams field",
 
 base = (SRC / "_config_base.py").read_text()
 base_keys = set(re.findall(r"^\s*(slc_\w+|pact_\w+):", base, re.M))
-report("config-base keys missing from the kwarg lists", base_keys - SLC_K - PACT_K)
+# Keys the TASK CLASS owns and strips before the config reaches the scenario --
+# diagnostics plumbing, not environment physics.
+task_only = set(
+    re.findall(
+        r'TASK_ONLY_KEYS\s*=\s*\((.*?)\)',
+        (SRC / "common.py").read_text(),
+        re.S,
+    )[0].replace('"', " ").replace(",", " ").split()
+)
+report(
+    "config-base keys missing from the kwarg lists",
+    base_keys - SLC_K - PACT_K - task_only,
+)
 report("kwarg-list keys missing from the config base", (SLC_K | PACT_K) - base_keys)
 
 for y in sorted(Path("benchmarl/conf/task/vmas_slc").glob("*.yaml")):

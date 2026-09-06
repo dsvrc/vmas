@@ -12,7 +12,10 @@
 from __future__ import annotations
 
 import copy
+import csv
 import math
+import os
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -30,7 +33,63 @@ from benchmarl.environments.vmas_slc.scenario import (
 )
 from benchmarl.utils import DEVICE_TYPING
 
-__all__ = ["VmasSlcClass", "VmasSlcTask", "SlcDialError"]
+__all__ = [
+    "VmasSlcClass",
+    "VmasSlcTask",
+    "SlcDialError",
+    "write_diagnostics_row",
+]
+
+
+def write_diagnostics_row(path: Path, state: Dict[str, Any], row: Dict[str, float]) -> None:
+    """Append one diagnostics row, one per collection iteration.
+
+    **Never append across schema changes.**  Two runs with different column
+    counts in one file misaligned every field in the second segment on POWER and
+    produced an impossible ``cond_psi`` of 0.02, costing a full analysis pass.  A
+    header mismatch rolls the old file aside instead of appending to it.
+
+    Deliberately a free function so it can be tested without torchrl.  ``state``
+    is a mutable dict carrying ``n`` (the row counter) and ``fields`` (the
+    header, resolved on the first call).
+    """
+    fields = ["iteration"] + sorted(row)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if state.get("fields") is None:
+            if path.exists():
+                with path.open("r", newline="") as fh:
+                    existing = next(csv.reader(fh), None)
+                if existing is not None and existing != fields:
+                    rolled = path.with_name(
+                        f"{path.stem}.{int(path.stat().st_mtime)}{path.suffix}"
+                    )
+                    path.rename(rolled)
+                    print(
+                        f"[slc] diagnostics schema changed "
+                        f"({len(existing)} -> {len(fields)} columns); rolled the "
+                        f"old file to {rolled}"
+                    )
+            fresh = not path.exists()
+            with path.open("a", newline="") as fh:
+                if fresh:
+                    csv.DictWriter(fh, fieldnames=fields).writeheader()
+            state["fields"] = fields
+            print(f"[slc] diagnostics -> {path}")
+        elif fields != state["fields"]:
+            # cannot happen within one run; a silent misalignment is exactly the
+            # failure this guard exists for
+            raise RuntimeError(
+                f"diagnostics schema changed mid-run: {state['fields']} -> {fields}"
+            )
+        with path.open("a", newline="") as fh:
+            csv.DictWriter(
+                fh, fieldnames=state["fields"], extrasaction="ignore"
+            ).writerow({"iteration": state.get("n", 0), **row})
+        state["n"] = state.get("n", 0) + 1
+    except OSError as exc:
+        # a logging failure must never take down a training run
+        print(f"[slc] could not write diagnostics to {path}: {exc}")
 
 
 class SlcDialError(RuntimeError):
@@ -55,6 +114,9 @@ class VmasSlcClass(VmasClass):
     #  construction
     # ------------------------------------------------------------------
 
+    #: Task-config keys owned by this class, never forwarded to the scenario.
+    TASK_ONLY_KEYS = ("slc_diag_csv",)
+
     def _split_config(self):
         config = copy.deepcopy(self.config)
         missing = [k for k in ("slc_severity", "pact_enabled") if k not in config]
@@ -63,6 +125,8 @@ class VmasSlcClass(VmasClass):
                 f"task config for {self.name} is missing {missing}; a partially "
                 "overridden config would silently run a different environment"
             )
+        for key in self.TASK_ONLY_KEYS:
+            config.pop(key, None)
         return config
 
     @property
@@ -134,7 +198,42 @@ class VmasSlcClass(VmasClass):
             info = batch.get(("next", group, "info"))
             out.update(self._dial_diagnostics(info))
             out.update(self._pact_diagnostics(info))
+            out.update(self._return_diagnostics(batch, group))
+        self._write_diagnostics_row(out)
         return out
+
+    @staticmethod
+    def _return_diagnostics(batch: TensorDictBase, group: str) -> Dict[str, float]:
+        """Enough of the return to make the diagnostics CSV self-contained.
+
+        This is per-step reward, NOT the episode return the training curve
+        reports -- it is here so a row can be read on its own, not so it can be
+        quoted as a result.
+        """
+        key = ("next", group, "reward")
+        if key not in batch.keys(include_nested=True):
+            return {}
+        r = batch.get(key).to(torch.float32)
+        return {"reward/step_mean": float(r.mean()), "reward/step_sum": float(r.sum())}
+
+    # -- persistence --------------------------------------------------------
+
+    def _diag_path(self) -> Path:
+        configured = self.config.get("slc_diag_csv", "") or ""
+        if configured:
+            return Path(configured)
+        # hydra chdirs into the run's own output directory, so cwd is already
+        # per-run and two arms cannot collide.
+        return Path(os.getcwd()) / "slc_pact_diagnostics.csv"
+
+    def _write_diagnostics_row(self, row: Dict[str, float]) -> None:
+        if not row:
+            return
+        state = getattr(self, "_diag_state", None)
+        if state is None:
+            state = {"n": 0, "fields": None}
+            self._diag_state = state
+        write_diagnostics_row(self._diag_path(), state, row)
 
     @staticmethod
     def _groups_with_info(batch: TensorDictBase) -> List[str]:
@@ -281,10 +380,22 @@ class VmasSlcClass(VmasClass):
             ("pact_clamp", "clamp_frac"),
             ("pact_n_updates", "n_updates"),
             ("pact_own_gain_coef", "own_gain_coef"),
+            ("pact_u_hat", "u_hat"),
         ):
             v = self._get(info, key)
             if v is not None:
                 out[f"pact/{name}"] = float(v.reshape(-1).mean())
+
+        # cond: can theta be DECOMPOSED, not merely predicted?  Non-finite is a
+        # VALUE and is reported as one rather than being silently dropped.
+        cond = self._get(info, "pact_cond")
+        if cond is not None:
+            c = cond.reshape(-1)
+            finite = c[torch.isfinite(c)]
+            out["pact/cond_psi"] = float(finite.max()) if finite.numel() else float("inf")
+            out["pact/cond_nonfinite_frac"] = float(
+                (~torch.isfinite(c)).to(torch.float32).mean()
+            )
 
         state = self._get(info, "pact_state")
         if state is not None:

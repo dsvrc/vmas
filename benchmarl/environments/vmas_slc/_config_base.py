@@ -51,6 +51,9 @@ class SlcConfigBase:
     slc_discrete_nvec: int = MISSING
     slc_observe_loading: bool = MISSING
 
+    # --- diagnostics (owned by the task class, never reaches the scenario) ---
+    slc_diag_csv: str = MISSING
+
     # --- the compensator (NEVER read by the dial) --------------------------
     pact_enabled: bool = MISSING
     pact_mode: str = MISSING

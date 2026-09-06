@@ -416,6 +416,9 @@ class PactMixin(SlcMixin):
         self._pact_clip = torch.zeros(
             batch_dim, self.slc_op.n_agents, device=device
         )
+        self._pact_cond = float("nan")
+        self._pact_cond_i = 0
+        self._pact_cond_every = 25
         print(self.pact.banner())
         return world
 
@@ -458,6 +461,14 @@ class PactMixin(SlcMixin):
         self._pact_delta = delta
         self._pact_clip = clipped.to(self._pact_clip.dtype)
 
+        # cond(E[psi psi']) -- can theta be DECOMPOSED, not merely predicted?
+        # Computed once per step, not once per agent, and only every
+        # ``_pact_cond_every`` steps: it is a (N,3,3) eigvalsh, cheap but not
+        # free, and it moves slowly.
+        self._pact_cond_i += 1
+        if self._pact_cond_i % self._pact_cond_every == 0:
+            self._pact_cond = float(self.pact.cond_psi())
+
     def _slc_command(self, agent: Agent, index: int) -> Tensor:
         if not self.pact_params.enabled:
             return agent.action.u
@@ -487,6 +498,9 @@ class PactMixin(SlcMixin):
                 "pact_own_gain_coef": one(d["own_gain_coef"]),
                 "pact_delta_abs": self._pact_delta[:, i].abs().mean(-1, keepdim=True),
                 "pact_delta_clip": self._pact_clip[:, i : i + 1],
+                "pact_cond": torch.full_like(
+                    self._slc_u[:, i : i + 1], self._pact_cond
+                ),
             }
         )
         return info

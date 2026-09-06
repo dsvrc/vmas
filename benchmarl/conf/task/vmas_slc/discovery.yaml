@@ -104,6 +104,12 @@ slc_discrete_nvec: 3         # levels per action component, DISCRETE ARMS ONLY
                              # action box, leaving the channel inverse nothing
                              # to work with -- use 7 or 9 for a discrete PACT
                              # arm, and report slc/sat_frac either way.
+slc_diag_csv: ""             # where to append one diagnostics row per
+                             # collection iteration.  Empty = the run's own
+                             # hydra output dir.  A header mismatch rolls the
+                             # old file aside rather than appending: two runs
+                             # with different column counts in one file
+                             # misalign every field in the second segment.
 slc_observe_loading: true    # A.4: the agent observes its OWN loading, one step
                              # stale.  That gap is the problem; a sensor that
                              # closed it would be an oracle.
