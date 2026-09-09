@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import math
+import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import lru_cache
@@ -30,7 +31,8 @@ __all__ = [
     "load_structure",
     "VEHICLE_LENGTH",
     "MIN_GAP",
-    "DEFAULT_MAP",
+    "MAP_RELATIVE",
+    "resolve_map",
 ]
 
 # ---------------------------------------------------------------------------
@@ -45,15 +47,84 @@ VEHICLE_LENGTH = 0.16
 #: 2000), carried onto the CPM Lab's 1:18 scale map: 2 / 18 = 0.111 m.
 MIN_GAP = 2.0 / 18.0
 
-DEFAULT_MAP = (
-    Path.home()
-    / "Downloads"
-    / "vmas"
-    / "vmas"
-    / "scenarios_data"
-    / "road_traffic"
-    / "road_traffic_cpm_lab.xml"
-)
+#: Where the CommonRoad map lives, relative to the vmas package root.
+MAP_RELATIVE = Path("scenarios_data") / "road_traffic" / "road_traffic_cpm_lab.xml"
+
+
+def _candidate_maps() -> List[Path]:
+    """Every place the map might be, most authoritative first.
+
+    Resolved WITHOUT importing vmas: ``find_spec`` locates the package without
+    executing it, so this module keeps working on a machine where vmas is absent
+    or where importing it would pull in pyglet.  That matters -- the conformance
+    suite and the ceiling decomposition are supposed to run on a laptop.
+    """
+    out: List[Path] = []
+    env = os.environ.get("ROAD_NS_MAP")
+    if env:
+        out.append(Path(env))
+
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("vmas")
+        origin = getattr(spec, "origin", None) if spec is not None else None
+        if origin:
+            out.append(Path(origin).parent / MAP_RELATIVE)
+        for loc in getattr(spec, "submodule_search_locations", None) or []:
+            out.append(Path(loc) / MAP_RELATIVE)
+    except Exception:  # noqa: BLE001 -- a broken vmas install must not stop us
+        pass
+
+    here = Path(__file__).resolve().parent
+    for base in (
+        here / "data",  # a copy vendored next to this module
+        here.parent,  # repo root
+        here.parent / "vmas",
+        here.parent.parent / "vmas" / "vmas",
+        Path.cwd(),
+        Path.cwd() / "vmas",
+        Path.home() / "Downloads" / "vmas" / "vmas",
+    ):
+        out.append(base / MAP_RELATIVE)
+        out.append(base / MAP_RELATIVE.name)
+
+    seen, uniq = set(), []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
+def resolve_map(path: Optional[Path | str] = None) -> Path:
+    """Find the map, or say precisely what was tried."""
+    if path is not None:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"map file not found at {p}")
+        return p
+    # An explicitly set ROAD_NS_MAP that does not exist is a typo, not a hint:
+    # falling through to a different map would silently run the wrong structure.
+    env = os.environ.get("ROAD_NS_MAP")
+    if env and not Path(env).exists():
+        raise FileNotFoundError(
+            f"ROAD_NS_MAP is set to {env}, which does not exist. Unset it to "
+            "search for the map automatically."
+        )
+    for cand in _candidate_maps():
+        if cand.exists():
+            return cand
+    tried = "\n  ".join(str(c) for c in _candidate_maps())
+    raise FileNotFoundError(
+        "could not find road_traffic_cpm_lab.xml. It ships with vmas at\n"
+        f"  vmas/{MAP_RELATIVE.as_posix()}\n"
+        "Point ROAD_NS_MAP at it, e.g.\n"
+        "  export ROAD_NS_MAP=$(python -c \"import vmas,pathlib;"
+        "print(pathlib.Path(vmas.__file__).parent/'"
+        f"{MAP_RELATIVE.as_posix()}')\")\n"
+        f"Tried:\n  {tried}"
+    )
 
 
 def _points(node: ET.Element) -> List[Tuple[float, float]]:
@@ -96,7 +167,8 @@ class RoadStructure:
         capacity_a = lanes_a * length_a / (VEHICLE_LENGTH + MIN_GAP)
     """
 
-    def __init__(self, lanelets: Dict[int, Lanelet]) -> None:
+    def __init__(self, lanelets: Dict[int, Lanelet], source: Optional[Path] = None) -> None:
+        self.source = source
         self.lanelets = lanelets
         self.ids: List[int] = sorted(lanelets)
         self.index: Dict[int, int] = {lid: k for k, lid in enumerate(self.ids)}
@@ -290,18 +362,18 @@ class RoadStructure:
             f"capacity in [{s['capacity_min']:.2f}, {s['capacity_max']:.2f}] "
             f"veh (median {s['capacity_median']:.2f}), "
             f"multi-lane {s['multi_lane_frac']:.0%}\n"
-            f"                classes: {names}"
+            f"                classes: {names}\n"
+            f"                map: {self.source}"
         )
 
 
-def load_structure(path: Path | str = DEFAULT_MAP) -> RoadStructure:
-    """Parse the CommonRoad map VMAS ships with ``road_traffic``."""
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(
-            f"map file not found at {path}. It ships with vmas at "
-            "vmas/scenarios_data/road_traffic/road_traffic_cpm_lab.xml"
-        )
+def load_structure(path: Optional[Path | str] = None) -> RoadStructure:
+    """Parse the CommonRoad map VMAS ships with ``road_traffic``.
+
+    With no argument the map is located automatically -- from ``ROAD_NS_MAP``,
+    then from the installed vmas package, then from a few repo-local paths.
+    """
+    path = resolve_map(path)
     root = ET.parse(path).getroot()
     lanelets: Dict[int, Lanelet] = {}
     for el in root.findall("lanelet"):
@@ -329,4 +401,4 @@ def load_structure(path: Path | str = DEFAULT_MAP) -> RoadStructure:
         )
     if not lanelets:
         raise ValueError(f"no lanelets parsed from {path}")
-    return RoadStructure(lanelets)
+    return RoadStructure(lanelets, source=path)
