@@ -1,0 +1,339 @@
+#  PACT-1 for VMAS road_traffic.  Part II of the spec.
+#
+#  torch only.  No vmas, no torchrl -- the estimator self-test must run offline.
+#
+#  ---------------------------------------------------------------------------
+#  What transferred, and what did not
+#  ---------------------------------------------------------------------------
+#  II.6 is the porting decision that most changes what may be claimed, and it
+#  had to be made before this file existed.
+#
+#  URB steers over an agent's DISCRETE route options: it z-scores the predicted
+#  cost of each option and subtracts g*kappa*z from that option's logit.  The
+#  policy gradient reaches trust because the shift sits inside a softmax.
+#
+#  road_traffic assigns a reference path at reset and its action is CONTINUOUS
+#  (v_command, steering).  There is no option set to rank.  So the channel here
+#  is a differential PACE shift: an agent whose own route is predicted more
+#  congested than the fleet's average eases off, one on a clear route presses
+#  on.  This is the shift the spec itself names for traffic -- "a uniform shift
+#  accomplishes exactly nothing and only a differential one helps" -- and it is
+#  loop-coupled in the same way, because easing off changes who you share the
+#  road with.
+#
+#  There is still no inverse.  You cannot subtract seconds off a congested
+#  lanelet.  So this instance sits in II.6's second row: **identification and
+#  steering only**, and the paper must say so.
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import torch
+from torch import Tensor
+
+__all__ = ["PactParams", "Basis", "RLS", "trust_from_logit", "confidence", "steer"]
+
+
+@dataclass(frozen=True)
+class PactParams:
+    # -- sensor (P-2.1) -----------------------------------------------------
+    y_clip: float = 10.0
+
+    # -- estimator (II.4) ---------------------------------------------------
+    mu: float = 0.999
+    p0: float = 10.0
+    """Declared; sweep, never tune. mu is the bias/variance dial of a tracking
+    floor of order sqrt(noise * drift) -- it cannot be tuned away, only
+    balanced."""
+
+    # -- trust (II.5) -------------------------------------------------------
+    g_max: float = 1.0
+    trust_bias: float = 2.2
+    """P-5.1, the INVERTED prior: w = 0 sits at 0.90 * g_max, i.e. near full
+    reliance, not half.  The estimator already supplies the magnitude, so this
+    knob tracks nothing -- whenever the estimate is right, optimal trust is a
+    constant.  Starting at half spends the whole budget at half compensation
+    with a correct waveform (measured: return 3642 against 5444)."""
+    trust_ema: float = 0.05
+
+    # -- channel (II.6) -----------------------------------------------------
+    kappa: float = 1.0
+    """Declared.  The z-score in ``steer`` is what lets this be a single
+    constant rather than a per-instance scale factor -- and a tuned kappa is a
+    tuned result."""
+
+    # -- pruning (P-3.4) ----------------------------------------------------
+    min_share: float = 1e-3
+    min_variance: float = 1e-8
+
+
+# ===========================================================================
+#  II.3 -- the basis
+# ===========================================================================
+
+
+class Basis:
+    """Project the unknown per-element sensitivity field onto ``r`` known
+    element classes.
+
+    The classes are public infrastructure -- a lanelet's type and lane count are
+    painted on it.  What is not handed over is ``beta*``: how much a peer unit
+    on each class actually costs today.  That drifts as the operating point
+    moves and must be tracked online.
+
+    P-1.1: ``r`` is independent of the number of agents AND of the number of
+    elements.  Here r = number of element classes = 3 on the CPM map.
+    """
+
+    def __init__(
+        self,
+        capacity: Tensor,
+        element_class: Tensor,
+        n_classes: int,
+        routes: Sequence[Sequence[int]],
+        p: PactParams,
+    ) -> None:
+        self.capacity = capacity
+        self.element_class = element_class
+        self.n_classes = int(n_classes)
+        self.routes = [tuple(r) for r in routes]
+        self.p = p
+        self.live: List[int] = list(range(self.n_classes))
+        self._shared: Optional[Tensor] = None
+
+    # -- the waveform ------------------------------------------------------
+
+    @property
+    def shared(self) -> Tensor:
+        """``S[m, p, q]`` = class-``m`` load one unit on route ``q`` places on
+        the elements of route ``p``.  ``(r, P, P)``, built once from structure.
+
+        This is a precomputation, not a shortcut: ``channels`` is on the
+        per-step path of the environment AND is called thousands of times by the
+        estimator self-test, and rebuilding the incidence matrix per call made
+        that test take ten minutes against the spec's budget of seconds.  The
+        brute-force definition in ``channels_bruteforce`` remains the authority
+        and ``verify`` checks this against it at startup.
+        """
+        if self._shared is None:
+            n_routes, n_elem = len(self.routes), self.capacity.shape[0]
+            inc = torch.zeros(n_routes, n_elem)
+            for p_i, r in enumerate(self.routes):
+                inc[p_i, torch.as_tensor(r, dtype=torch.long)] = 1.0
+            contrib = inc / self.capacity.unsqueeze(0)  # (P, A)
+            S = torch.empty(self.n_classes, n_routes, n_routes)
+            for m in range(self.n_classes):
+                mask = (self.element_class == m).to(torch.float32)
+                S[m] = (inc * mask) @ contrib.transpose(0, 1)
+            self._shared = S
+        return self._shared
+
+    def channels(self, route_of: Sequence[int]) -> Tensor:
+        """``x[i, m] = sum over j != i of the class-m load peer j places on the
+        elements agent i traverses``.  ``(N, r)``.
+
+        Zero-diagonal by construction (P-3.1): a lone agent reads exactly zero
+        on every channel, which is what makes the estimated quantity a coupling
+        rather than a self-effect.
+        """
+        ix = torch.as_tensor(list(route_of), dtype=torch.long)
+        sub = self.shared[:, ix][:, :, ix]  # (r, N, N)
+        # subtract the j == i term rather than masking: ASSERTED, not argued
+        own = torch.diagonal(sub, dim1=-2, dim2=-1)  # (r, N)
+        return (sub.sum(dim=-1) - own).transpose(0, 1).contiguous()
+
+    def channels_bruteforce(self, route_of: Sequence[int]) -> Tensor:
+        """P-3.2: the definition, written straight out as loops.
+
+        The vectorised path above is verified against this at startup and the
+        run aborts on mismatch.  Index order and self-exclusion are exactly the
+        kind of wiring bug that leaves every diagnostic looking healthy.
+        """
+        n = len(route_of)
+        out = torch.zeros(n, self.n_classes)
+        for i in range(n):
+            Ei = set(self.routes[route_of[i]])
+            for j in range(n):
+                if j == i:
+                    continue
+                Ej = set(self.routes[route_of[j]])
+                for a in Ei & Ej:
+                    out[i, int(self.element_class[a])] += 1.0 / float(self.capacity[a])
+        return out
+
+    def verify(self, route_of: Sequence[int]) -> None:
+        fast, slow = self.channels(route_of), self.channels_bruteforce(route_of)
+        err = float((fast - slow).abs().max())
+        if err > 1e-5:
+            raise AssertionError(
+                f"vectorised basis disagrees with the brute-force definition by "
+                f"{err:.3e}. This is gate 1: abort, it is a wiring bug."
+            )
+
+    # -- P-3.3 the geometric reference -------------------------------------
+
+    def geometric_reference(self, n_agents: int, samples: int = 512, seed: int = 0) -> Tensor:
+        """The load each agent would see if every peer acted uniformly at random.
+
+        A function of structure and schedule only -- no run data enters.
+        Centring on this is what makes the intercept and the class channels
+        separable: uncentred, the raw channels carry a large common mean against
+        an intercept column of 1, and the split becomes unidentifiable even
+        though prediction stays fine (measured condition number 1.3e5).
+        """
+        gen = torch.Generator().manual_seed(seed)
+        acc = torch.zeros(self.n_classes)
+        for _ in range(samples):
+            assign = torch.randint(0, len(self.routes), (n_agents,), generator=gen)
+            acc += self.channels(assign.tolist()).mean(dim=0)
+        return acc / samples
+
+    def scale_reference(self, n_agents: int, samples: int = 512, seed: int = 0) -> Tensor:
+        gen = torch.Generator().manual_seed(seed + 1)
+        vals = []
+        for _ in range(samples // 8):
+            assign = torch.randint(0, len(self.routes), (n_agents,), generator=gen)
+            vals.append(self.channels(assign.tolist()))
+        v = torch.cat(vals, dim=0)
+        return v.std(dim=0, unbiased=False).clamp_min(1e-8)
+
+    # -- P-3.4 pruning ------------------------------------------------------
+
+    def prune(self, n_agents: int, seed: int = 0) -> List[int]:
+        """Drop channels below a declared share or variance, keeping every
+        downstream index aligned."""
+        ref = self.geometric_reference(n_agents, seed=seed)
+        std = self.scale_reference(n_agents, seed=seed)
+        total = ref.sum().clamp_min(1e-30)
+        keep = [
+            m
+            for m in range(self.n_classes)
+            if float(ref[m] / total) >= self.p.min_share
+            and float(std[m]) >= self.p.min_variance
+        ]
+        self.live = keep or list(range(self.n_classes))
+        return self.live
+
+    def design(self, route_of: Sequence[int], ref: Tensor, scale: Tensor) -> Tensor:
+        """``psi = [1, centred and scaled live channels]``.  ``(N, 1 + r_live)``."""
+        x = self.channels(route_of)[:, self.live]
+        z = (x - ref[self.live].unsqueeze(0)) / scale[self.live].unsqueeze(0)
+        return torch.cat([torch.ones(z.shape[0], 1), z], dim=-1)
+
+
+# ===========================================================================
+#  II.4 -- the estimator
+# ===========================================================================
+
+
+class RLS:
+    """Per-agent recursive least squares with forgetting.
+
+    P-4.1 decentralized: agent *i* never sees another agent's residual. It sees
+    only peers' executed actions, which a connected fleet broadcasts anyway.
+    """
+
+    def __init__(self, n_agents: int, dim: int, p: PactParams) -> None:
+        self.p = p
+        self.dim = dim
+        self.beta = torch.zeros(n_agents, dim)
+        self.P = p.p0 * torch.eye(dim).expand(n_agents, dim, dim).clone()
+        self.n_updates = torch.zeros(n_agents)
+        self.n_skipped = torch.zeros(n_agents)
+
+    def update(self, psi: Tensor, y: Tensor) -> Tensor:
+        """One row per agent. Returns the prior residual ``y - psi'beta``.
+
+        P-4.2: rows whose regressor is numerically zero are SKIPPED, not fed.
+        A dead row carries no information about beta but still divides P by mu,
+        inflating the covariance every step and silently tightening the
+        effective forgetting factor -- so mu stops meaning what the banner says.
+        """
+        live = psi.abs().sum(dim=-1) > 0
+        prior = (self.beta * psi).sum(-1)
+        resid = y - prior
+
+        Ppsi = torch.einsum("nij,nj->ni", self.P, psi)
+        denom = self.p.mu + (psi * Ppsi).sum(-1)
+        K = Ppsi / denom.unsqueeze(-1).clamp_min(1e-12)
+        new_beta = self.beta + K * resid.unsqueeze(-1)
+        new_P = (self.P - K.unsqueeze(-1) * Ppsi.unsqueeze(-2)) / self.p.mu
+        new_P = 0.5 * (new_P + new_P.transpose(-1, -2))
+
+        m = live.unsqueeze(-1)
+        self.beta = torch.where(m, new_beta, self.beta)
+        self.P = torch.where(m.unsqueeze(-1), new_P, self.P)
+        self.n_updates += live.to(torch.float32)
+        self.n_skipped += (~live).to(torch.float32)
+        return resid
+
+
+# ===========================================================================
+#  II.5 -- trust
+# ===========================================================================
+
+
+def trust_from_logit(w: Tensor, p: PactParams) -> Tensor:
+    """``g = g_max * sigmoid(w + bias)``.  The inverted prior of P-5.1."""
+    return p.g_max * torch.sigmoid(w + p.trust_bias)
+
+
+def confidence(psi: Tensor, P: Tensor, p: PactParams, r: int) -> Tensor:
+    """``conf = 1 / (1 + r * psi'P psi / (p0 * ||psi||^2))``.
+
+    P-5.2: gate on the uncertainty of the scalar the compensator actually uses,
+    NOT on tr(P).  The trace version is a trap -- it is dominated by the least
+    excited direction, which forgetting inflates without bound, so once the
+    fleet converges it quietly disarms a working compensator while fit R^2 still
+    reads 0.9998.
+    """
+    quad = torch.einsum("ni,nij,nj->n", psi, P, psi)
+    norm2 = psi.pow(2).sum(-1).clamp_min(1e-12)
+    return 1.0 / (1.0 + r * quad / (p.p0 * norm2))
+
+
+# ===========================================================================
+#  II.6 / II.7 -- the channel and the floor property
+# ===========================================================================
+
+
+def steer(v_command: Tensor, predicted: Tensor, g: Tensor, p: PactParams) -> Tensor:
+    """Differential pace shift.  ``(N,) -> (N,)``.
+
+    ``predicted`` is each agent's predicted relative excess. It is z-scored
+    ACROSS THE FLEET so the shift is dimensionless (P-6.1) and so a uniform
+    prediction moves nobody -- only the differential helps, which is the commons
+    in miniature.
+
+    P-7.1, the floor property: at ``g = 0`` this returns ``v_command`` bit for
+    bit for any ``predicted``, however wrong; and when every prediction is
+    identical the shift is defined to be exactly zero rather than NaN. The
+    estimator therefore sits entirely outside the worst-case decision path.
+    """
+    mean = predicted.mean()
+    std = predicted.std(unbiased=False)
+    z = torch.where(
+        std > 1e-12, (predicted - mean) / std.clamp_min(1e-12), torch.zeros_like(predicted)
+    )
+    return v_command * (1.0 - g * p.kappa * z)
+
+
+def herd_index(route_of: Sequence[int], n_routes: int) -> float:
+    """P-8.1: normalised Herfindahl over the fleet's choices.
+
+    0 = perfectly spread, 1 = everyone on one option. Rising concentration
+    alongside rising trust is the externality becoming visible.
+
+    **Logged, never acted on.** Acting on it would make the method a mechanism
+    rather than a per-agent estimator and break the decentralization claim.
+    """
+    n = len(route_of)
+    if n <= 1:
+        return 1.0
+    counts = torch.bincount(torch.as_tensor(route_of), minlength=n_routes).to(torch.float32)
+    shares = counts / counts.sum().clamp_min(1)
+    h = float((shares**2).sum())
+    return (h - 1.0 / n) / (1.0 - 1.0 / n)
