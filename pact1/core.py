@@ -131,19 +131,41 @@ class Basis:
             self._shared = S
         return self._shared
 
-    def channels(self, route_of: Sequence[int]) -> Tensor:
-        """``x[i, m] = sum over j != i of the class-m load peer j places on the
-        elements agent i traverses``.  ``(N, r)``.
+    @staticmethod
+    def _as_batched(route_of) -> tuple[Tensor, bool]:
+        """Accept one fleet or a batch of them.  Returns ``((B, N), batched)``."""
+        ix = torch.as_tensor(
+            list(route_of) if not isinstance(route_of, Tensor) else route_of,
+            dtype=torch.long,
+        )
+        if ix.dim() == 1:
+            return ix.unsqueeze(0), False
+        return ix, True
+
+    def channels(self, route_of) -> Tensor:
+        """``x[b, i, m] = sum over j != i of the class-m load peer j places on
+        the elements agent i traverses``.
+
+        ``(N, r)`` for a single fleet, ``(B, N, r)`` for a batch of them --
+        VMAS runs B parallel worlds and each has its own route assignment, so
+        collapsing them (by averaging, say) would estimate a coupling no world
+        actually has.
 
         Zero-diagonal by construction (P-3.1): a lone agent reads exactly zero
         on every channel, which is what makes the estimated quantity a coupling
         rather than a self-effect.
         """
-        ix = torch.as_tensor(list(route_of), dtype=torch.long)
-        sub = self.shared[:, ix][:, :, ix]  # (r, N, N)
+        ix, batched = self._as_batched(route_of)
+        S = self.shared.to(ix.device)  # (r, P, P)
+        # gather the (N, N) sub-block per world: S[m, ix[b,i], ix[b,j]]
+        rows = S[:, ix]  # (r, B, N, P)
+        sub = torch.gather(
+            rows, 3, ix.unsqueeze(0).unsqueeze(2).expand(S.shape[0], *ix.shape, ix.shape[1])
+        )  # (r, B, N, N)
         # subtract the j == i term rather than masking: ASSERTED, not argued
-        own = torch.diagonal(sub, dim1=-2, dim2=-1)  # (r, N)
-        return (sub.sum(dim=-1) - own).transpose(0, 1).contiguous()
+        own = torch.diagonal(sub, dim1=-2, dim2=-1)  # (r, B, N)
+        out = (sub.sum(dim=-1) - own).permute(1, 2, 0).contiguous()  # (B, N, r)
+        return out if batched else out[0]
 
     def channels_bruteforce(self, route_of: Sequence[int]) -> Tensor:
         """P-3.2: the definition, written straight out as loops.
@@ -217,11 +239,14 @@ class Basis:
         self.live = keep or list(range(self.n_classes))
         return self.live
 
-    def design(self, route_of: Sequence[int], ref: Tensor, scale: Tensor) -> Tensor:
-        """``psi = [1, centred and scaled live channels]``.  ``(N, 1 + r_live)``."""
-        x = self.channels(route_of)[:, self.live]
-        z = (x - ref[self.live].unsqueeze(0)) / scale[self.live].unsqueeze(0)
-        return torch.cat([torch.ones(z.shape[0], 1), z], dim=-1)
+    def design(self, route_of, ref: Tensor, scale: Tensor) -> Tensor:
+        """``psi = [1, centred and scaled live channels]``.
+
+        ``(N, 1 + r_live)`` for one fleet, ``(B, N, 1 + r_live)`` for a batch.
+        """
+        x = self.channels(route_of)[..., self.live]
+        z = (x - ref[self.live]) / scale[self.live]
+        return torch.cat([torch.ones_like(z[..., :1]), z], dim=-1)
 
 
 # ===========================================================================
@@ -236,27 +261,40 @@ class RLS:
     only peers' executed actions, which a connected fleet broadcasts anyway.
     """
 
-    def __init__(self, n_agents: int, dim: int, p: PactParams) -> None:
+    def __init__(self, n_agents: int, dim: int, p: PactParams, batch: int = 1) -> None:
         self.p = p
         self.dim = dim
-        self.beta = torch.zeros(n_agents, dim)
-        self.P = p.p0 * torch.eye(dim).expand(n_agents, dim, dim).clone()
-        self.n_updates = torch.zeros(n_agents)
-        self.n_skipped = torch.zeros(n_agents)
+        self.batch = int(batch)
+        # (B, N, ...) -- each parallel world is an INDEPENDENT deployment running
+        # its own estimator.  Sharing one across worlds would average couplings
+        # that no single world has.
+        self.beta = torch.zeros(self.batch, n_agents, dim)
+        self.P = p.p0 * torch.eye(dim).expand(self.batch, n_agents, dim, dim).clone()
+        self.n_updates = torch.zeros(self.batch, n_agents)
+        self.n_skipped = torch.zeros(self.batch, n_agents)
+
+    def predict(self, psi: Tensor) -> Tensor:
+        """``beta' psi``.  ``psi`` is ``(N, d)`` or ``(B, N, d)``."""
+        p = psi.unsqueeze(0) if psi.dim() == 2 else psi
+        return (self.beta * p).sum(-1)
 
     def update(self, psi: Tensor, y: Tensor) -> Tensor:
-        """One row per agent. Returns the prior residual ``y - psi'beta``.
+        """One row per agent per world.  Returns the prior residual.
 
         P-4.2: rows whose regressor is numerically zero are SKIPPED, not fed.
         A dead row carries no information about beta but still divides P by mu,
         inflating the covariance every step and silently tightening the
         effective forgetting factor -- so mu stops meaning what the banner says.
         """
-        live = psi.abs().sum(dim=-1) > 0
-        prior = (self.beta * psi).sum(-1)
-        resid = y - prior
+        if psi.dim() == 2:
+            psi = psi.unsqueeze(0).expand(self.batch, -1, -1)
+        if y.dim() == 1:
+            y = y.unsqueeze(0).expand(self.batch, -1)
 
-        Ppsi = torch.einsum("nij,nj->ni", self.P, psi)
+        live = psi.abs().sum(dim=-1) > 0
+        resid = y - (self.beta * psi).sum(-1)
+
+        Ppsi = torch.einsum("bnij,bnj->bni", self.P, psi)
         denom = self.p.mu + (psi * Ppsi).sum(-1)
         K = Ppsi / denom.unsqueeze(-1).clamp_min(1e-12)
         new_beta = self.beta + K * resid.unsqueeze(-1)
@@ -290,7 +328,12 @@ def confidence(psi: Tensor, P: Tensor, p: PactParams, r: int) -> Tensor:
     fleet converges it quietly disarms a working compensator while fit R^2 still
     reads 0.9998.
     """
-    quad = torch.einsum("ni,nij,nj->n", psi, P, psi)
+    if psi.dim() == 2 and P.dim() == 4:
+        psi = psi.unsqueeze(0).expand(P.shape[0], -1, -1)
+    if psi.dim() == 2:
+        quad = torch.einsum("ni,nij,nj->n", psi, P, psi)
+    else:
+        quad = torch.einsum("bni,bnij,bnj->bn", psi, P, psi)
     norm2 = psi.pow(2).sum(-1).clamp_min(1e-12)
     return 1.0 / (1.0 + r * quad / (p.p0 * norm2))
 
@@ -313,10 +356,14 @@ def steer(v_command: Tensor, predicted: Tensor, g: Tensor, p: PactParams) -> Ten
     identical the shift is defined to be exactly zero rather than NaN. The
     estimator therefore sits entirely outside the worst-case decision path.
     """
-    mean = predicted.mean()
-    std = predicted.std(unbiased=False)
+    # z-score ACROSS THE FLEET, within each world: the last axis is the fleet.
+    # Pooling worlds would make one world's congestion steer another's vehicles.
+    mean = predicted.mean(dim=-1, keepdim=True)
+    std = predicted.std(dim=-1, unbiased=False, keepdim=True)
     z = torch.where(
-        std > 1e-12, (predicted - mean) / std.clamp_min(1e-12), torch.zeros_like(predicted)
+        std > 1e-12,
+        (predicted - mean) / std.clamp_min(1e-12),
+        torch.zeros_like(predicted),
     )
     return v_command * (1.0 - g * p.kappa * z)
 

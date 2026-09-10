@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from road_ns.ceiling import decompose, fleet_scan  # noqa: E402
 from road_ns.dial import DialParams, dial_g, driver_A, sensitivity  # noqa: E402
-from road_ns.structure import load_structure  # noqa: E402
+from road_ns.structure import load_structure, loop_assignment  # noqa: E402
 
 
 def dial_table(struct, sigma: float) -> dict:
@@ -44,18 +44,14 @@ def dial_table(struct, sigma: float) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--agents", type=int, default=20)
+    ap.add_argument("--agents", type=int, default=40)
     ap.add_argument("--severities", type=float, nargs="+", default=[0.5, 1.0, 3.0])
     ap.add_argument("--csv", type=str, default=None)
     args = ap.parse_args()
 
     struct = load_structure()
-    routes = struct.routes()
-    W = struct.coupling(
-        torch.randint(0, len(routes), (args.agents,),
-                      generator=torch.Generator().manual_seed(0)).tolist(),
-        routes,
-    )
+    routes = struct.declared_routes("loops")
+    W = struct.coupling(loop_assignment(args.agents), routes)
 
     print("=" * 88)
     print("road_ns -- I.6 mandatory report   (offline: no policy, no training, no simulator)")

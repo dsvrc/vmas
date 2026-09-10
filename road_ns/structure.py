@@ -152,6 +152,7 @@ class Lanelet:
     successors: Tuple[int, ...]
     adj_left: Optional[int]
     adj_right: Optional[int]
+    centre: Tuple[Tuple[float, float], ...] = ()
 
 
 class RoadStructure:
@@ -192,6 +193,41 @@ class RoadStructure:
         )
         if not torch.isfinite(self.capacity).all() or float(self.capacity.min()) <= 0:
             raise ValueError("every element must have a finite positive capacity")
+        self._centre_points: Optional[Tensor] = None
+        self._centre_owner: Optional[Tensor] = None
+
+    # -- geometry, for locating a vehicle on the medium ---------------------
+
+    def centre_cloud(self, max_per_element: int = 6) -> Tuple[Tensor, Tensor]:
+        """A point cloud of lanelet centre lines, plus which element owns each.
+
+        Returns ``(points (K, 2), owner (K,))``.  Used at run time to answer
+        "which element is this vehicle on" by nearest neighbour, which needs
+        only the vehicle's position and the map -- no dependency on
+        ``road_traffic``'s internal reference-path bookkeeping, so a change
+        there cannot silently repoint the medium.
+        """
+        if self._centre_points is None:
+            pts, own = [], []
+            for a, lid in enumerate(self.ids):
+                c = self.lanelets[lid].centre
+                if not c:
+                    continue
+                step = max(1, len(c) // max_per_element)
+                sel = list(c[::step])[:max_per_element] or [c[0]]
+                for pt in sel:
+                    pts.append(pt)
+                    own.append(a)
+            self._centre_points = torch.tensor(pts, dtype=torch.float32)
+            self._centre_owner = torch.tensor(own, dtype=torch.long)
+        return self._centre_points, self._centre_owner
+
+    def locate(self, pos: Tensor) -> Tensor:
+        """Nearest element to each position.  ``pos (B, N, 2) -> (B, N)``."""
+        pts, own = self.centre_cloud()
+        pts, own = pts.to(pos.device), own.to(pos.device)
+        d = torch.cdist(pos.reshape(-1, 2), pts)
+        return own[d.argmin(dim=-1)].reshape(pos.shape[:-1])
 
     # -- lane grouping ------------------------------------------------------
 
@@ -280,6 +316,37 @@ class RoadStructure:
         # de-duplicate while keeping order deterministic
         return tuple(sorted(set(out)))
 
+    def declared_routes(self, which: str = "intersection") -> Tuple[Tuple[int, ...], ...]:
+        """The scenario's own reference paths, as element INDICES.
+
+        ``which`` is one of ``intersection`` / ``merge_in`` / ``merge_out``,
+        matching ``road_traffic``'s ``scenario_probabilities`` ordering, or
+        ``all`` for the union.  These are what ``path_id`` indexes at run time,
+        so an agent's element set is a direct lookup rather than an inference.
+        """
+        from road_ns.structure import DECLARED_ROUTE_SETS  # late: module-level data
+
+        if which == "all":
+            sets = [r for v in DECLARED_ROUTE_SETS.values() for r in v]
+        else:
+            if which not in DECLARED_ROUTE_SETS:
+                raise ValueError(
+                    f"unknown route set {which!r}; expected one of "
+                    f"{sorted(DECLARED_ROUTE_SETS)} or 'all'"
+                )
+            sets = list(DECLARED_ROUTE_SETS[which])
+        out = []
+        for r in sets:
+            missing = [lid for lid in r if lid not in self.index]
+            if missing:
+                raise ValueError(
+                    f"route {r} references lanelets {missing} absent from "
+                    f"{self.source}; the map and the hardcoded reference paths "
+                    "in road_traffic.get_reference_paths have diverged"
+                )
+            out.append(tuple(self.index[lid] for lid in r))
+        return tuple(out)
+
     # -- the declared operator (NS-1.2) -------------------------------------
 
     def route_incidence(self, routes: Sequence[Sequence[int]]) -> Tensor:
@@ -367,6 +434,79 @@ class RoadStructure:
         )
 
 
+# ---------------------------------------------------------------------------
+#  The scenario's OWN route set.
+#
+#  Copied verbatim from ``get_reference_paths`` in vmas/scenarios/road_traffic.py,
+#  where the reference paths are declared as explicit lanelet-ID sequences.
+#  Using these rather than routes enumerated from the successor graph matters:
+#  the operator then describes the routes agents ACTUALLY drive, so ``W`` is the
+#  coupling the scenario really has rather than one this module invented.
+#
+#  These are lanelet IDs, not indices.  Use ``RoadStructure.declared_routes``.
+# ---------------------------------------------------------------------------
+
+PATH_INTERSECTION: Tuple[Tuple[int, ...], ...] = (
+    (11, 25, 13), (11, 26, 52, 37), (11, 72, 91),
+    (12, 18, 14), (12, 17, 43, 38), (12, 73, 92),
+    (39, 51, 37), (39, 50, 102, 91), (39, 20, 63),
+    (40, 44, 38), (40, 45, 97, 92), (40, 21, 64),
+    (89, 103, 91), (89, 104, 78, 63), (89, 46, 13),
+    (90, 96, 92), (90, 95, 69, 64), (90, 47, 14),
+    (65, 77, 63), (65, 76, 24, 13), (65, 98, 37),
+    (66, 70, 64), (66, 71, 19, 14), (66, 99, 38),
+)
+PATH_MERGE_IN: Tuple[Tuple[int, ...], ...] = ((34, 32), (33, 31), (35, 31), (36, 49))
+PATH_MERGE_OUT: Tuple[Tuple[int, ...], ...] = ((6, 8), (5, 7), (5, 9), (23, 10))
+
+#: The seven full-map loops, from ``get_reference_lanelet_index``.  ``map_type=1``
+#: assigns each agent a rotation of one of these (``path_to_loop``), and a
+#: rotation does not change the element SET -- so as far as the operator is
+#: concerned there are seven distinct routes, not forty.
+PATH_LOOPS: Tuple[Tuple[int, ...], ...] = (
+    (4, 6, 8, 60, 58, 56, 54, 80, 82, 84, 86, 34, 32, 30, 28, 2),
+    (1, 3, 23, 10, 12, 17, 43, 38, 36, 49, 29, 27),
+    (64, 62, 75, 55, 53, 79, 81, 101, 88, 90, 95, 69),
+    (40, 45, 97, 92, 94, 100, 83, 85, 33, 31, 48, 42),
+    (5, 7, 59, 57, 74, 68, 66, 71, 19, 14, 16, 22),
+    (41, 39, 20, 63, 61, 57, 55, 67, 65, 98, 37, 35, 31, 29),
+    (3, 5, 9, 11, 72, 91, 93, 81, 83, 87, 89, 46, 13, 15),
+)
+
+#: ``path_to_loop`` from ``get_reference_paths``: agent id (1-based) -> loop.
+#: This is road_traffic's OWN fleet assignment, so using it means ``W``
+#: describes the coupling the scenario really has rather than one chosen here.
+PATH_TO_LOOP: Tuple[int, ...] = (
+    1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6,
+    7, 1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7, 1, 6, 7, 1, 1,
+)
+
+
+def loop_assignment(n_agents: int) -> List[int]:
+    """Route index per agent, as ``road_traffic`` assigns them.
+
+    A rotation of a loop does not change its element set, so the forty distinct
+    ``path_id`` values collapse to the seven loops as far as the operator is
+    concerned.
+    """
+    if n_agents > len(PATH_TO_LOOP):
+        raise ValueError(
+            f"road_traffic's path_to_loop defines {len(PATH_TO_LOOP)} agent "
+            f"slots; asked for {n_agents}"
+        )
+    return [PATH_TO_LOOP[i] - 1 for i in range(n_agents)]
+
+
+#: ``scenario_probabilities`` index -> route set, matching road_traffic's own
+#: ordering of [intersection, merge-in, merge-out], plus the full-map loops.
+DECLARED_ROUTE_SETS = {
+    "intersection": PATH_INTERSECTION,
+    "merge_in": PATH_MERGE_IN,
+    "merge_out": PATH_MERGE_OUT,
+    "loops": PATH_LOOPS,
+}
+
+
 def load_structure(path: Optional[Path | str] = None) -> RoadStructure:
     """Parse the CommonRoad map VMAS ships with ``road_traffic``.
 
@@ -398,6 +538,7 @@ def load_structure(path: Optional[Path | str] = None) -> RoadStructure:
             successors=tuple(int(c.get("ref")) for c in el.findall("successor")),
             adj_left=int(adj_l.get("ref")) if adj_l is not None else None,
             adj_right=int(adj_r.get("ref")) if adj_r is not None else None,
+            centre=tuple(centre),
         )
     if not lanelets:
         raise ValueError(f"no lanelets parsed from {path}")

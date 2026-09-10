@@ -1,0 +1,63 @@
+defaults:
+  - road_ns_road_traffic_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# The stock task: vmas/road_traffic on the CPM Lab CommonRoad map.
+# reward, done and the base observation are INHERITED untouched.
+# ---------------------------------------------------------------------------
+max_steps: 200
+n_agents: 40                 # path_to_loop's own maximum, and the operating
+                             # point chosen on the Part C decomposition BEFORE
+                             # any method code ran (NS-4.1)
+map_type: "1"                # the entire map: its seven reference loops are the
+                             # only route set that satisfies NS-1.2's spread
+                             # requirement while keeping loading in the measured
+                             # regime.  The intersection sub-map spans only
+                             # 1.57x and is flat.
+is_partial_observation: True
+n_nearing_agents_observed: 2
+
+# ---------------------------------------------------------------------------
+# The severity dial.  TASK physics: this block reaches EVERY arm (NS-3.1).
+# ---------------------------------------------------------------------------
+ns_severity: 1.0             # sigma. 0 gives harm == 1.0 EXACTLY at every
+                             # driver value, so the stock task is recovered bit
+                             # for bit. sigma > 1 is a beyond-physical stress
+                             # test and must be labelled as such everywhere.
+ns_period: 100               # one weather cycle
+ns_wet_fraction: 0.5         # the remaining half is EXACTLY dry -- that is what
+                             # makes NS-2.5's placebo regime provable rather
+                             # than merely small
+ns_alpha: 2.28               # f(u) = 1 + alpha*u. LINEAR, not the BPR quartic:
+                             # those coefficients are calibrated near capacity
+                             # and this medium runs well below it. PLACEHOLDER
+                             # inherited from URB -- re-derive with
+                             # road_ns.dial.calibrate_alpha on this instance
+                             # before quoting any result.
+ns_mean_preserve: false      # NS-5.1: normalise g by its own cycle mean so only
+                             # the shape varies and no capacity is removed
+ns_observe_loading: true     # II.2: the agent observes its OWN relative excess,
+                             # ONE STEP STALE. Proprioception, not privilege.
+ns_route_set: loops
+
+# ---------------------------------------------------------------------------
+# PACT-1. Read by the method layer only; the dial never sees these keys.
+# ---------------------------------------------------------------------------
+pact_enabled: false          # the arm switch
+pact_trust: 0.9              # P-5.1's INVERTED prior: near full reliance, not
+                             # half. The estimator supplies the magnitude, so
+                             # this knob tracks nothing -- whenever the estimate
+                             # is right, optimal trust is a constant. Held
+                             # CONSTANT here: P-6.2's learned trust needs the
+                             # shift inside the policy's own distribution, which
+                             # continuous actions do not give for free.
+pact_kappa: 1.0              # declared. The z-score in steer() is what lets
+                             # this be one constant rather than a per-instance
+                             # scale factor -- and a tuned kappa is a tuned
+                             # result.
+pact_mu: 0.999               # declared; sweep, never tune
+pact_p0: 10.0
+pact_y_clip: 10.0            # declared outlier bound on the sensor; report
+                             # clip_frac
+pact_warmup: 200             # steps before any reliance is applied

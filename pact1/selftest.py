@@ -83,6 +83,30 @@ def _bruteforce():
     )
 
 
+@check("test_batched_basis_equals_per_world")
+def _batched():
+    """VMAS runs B parallel worlds, each with its own fleet layout.  Collapsing
+    them -- by averaging the design matrix, say -- would estimate a coupling no
+    single world actually has."""
+    b = make_basis()
+    b.prune(N)
+    ref, scale = b.geometric_reference(N), b.scale_reference(N)
+    idx = torch.stack([torch.as_tensor(fleet(N, seed=k)) for k in range(4)])
+    bx = b.design(idx, ref, scale)
+    assert bx.shape == (4, N, 1 + len(b.live)), bx.shape
+    for k in range(4):
+        assert torch.allclose(bx[k], b.design(fleet(N, seed=k), ref, scale), atol=1e-6)
+    r = RLS(N, bx.shape[-1], P, batch=4)
+    r.update(bx, torch.randn(4, N))
+    assert r.beta.shape == (4, N, bx.shape[-1])
+    sh = steer(torch.ones(4, N), r.predict(bx), torch.full((4, N), 0.9), P)
+    means = sh.mean(-1)
+    assert torch.allclose(means, torch.ones(4), atol=1e-5), (
+        f"a uniform pace shift must net to zero within each world, got {means}"
+    )
+    return "4 worlds: batched == per-world, estimators independent, shift nets to 1.0 in each"
+
+
 @check("test_channel_pruning_keeps_everything_aligned")
 def _prune():
     b = make_basis()

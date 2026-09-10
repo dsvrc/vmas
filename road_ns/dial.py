@@ -88,6 +88,11 @@ def driver_A(step: Tensor, p: DialParams) -> Tensor:
         A   = sin^2( pi * min(phi/w, 1) )  if phi < w  else  0
     """
     phi = (step.to(torch.float32) % p.period) / float(p.period)
+    if p.wet_fraction <= 0.0:
+        # A permanently dry cycle: the placebo arm.  Returned as an exact zero
+        # rather than reached through a division, so the dial is provably inert
+        # for every sigma instead of merely very small.
+        return torch.zeros_like(phi)
     ramp = torch.sin(math.pi * torch.clamp(phi / p.wet_fraction, max=1.0)) ** 2
     return torch.where(phi < p.wet_fraction, ramp, torch.zeros_like(ramp))
 

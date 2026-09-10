@@ -28,11 +28,17 @@ from road_ns.dial import (  # noqa: E402
     performance,
     sensitivity,
 )
-from road_ns.structure import load_structure  # noqa: E402
+from road_ns.structure import load_structure, loop_assignment  # noqa: E402
 
 RESULTS: List[Tuple[str, bool, str]] = []
 STRUCT = load_structure()
-ROUTES = STRUCT.routes()
+#: THE COMMITTED INSTANCE: road_traffic map_type=1 (full map), its own seven
+#: reference loops, its own agent->loop assignment, 40 agents (path_to_loop's
+#: maximum).  Chosen on the Part C decomposition BEFORE any method code ran
+#: (NS-4.1): it is the only route set that satisfies NS-1.2's spread
+#: requirement while keeping loading in URB's measured regime.
+ROUTES = STRUCT.declared_routes("loops")
+N_AGENTS = 40
 
 
 def check(name: str):
@@ -48,9 +54,11 @@ def check(name: str):
     return wrap
 
 
-def _fleet(n=20, seed=0):
-    gen = torch.Generator().manual_seed(seed)
-    return torch.randint(0, len(ROUTES), (n,), generator=gen).tolist()
+def _fleet(n=N_AGENTS, seed=0):
+    # The scenario's OWN assignment, not a random one. seed rotates which
+    # slots are used so the checks see more than a single fleet.
+    a = loop_assignment(40)
+    return [a[(i + seed) % len(a)] for i in range(n)]
 
 
 # ===========================================================================
@@ -68,7 +76,7 @@ def _zero_diag():
 
 @check("test_operator_is_asymmetric_and_spread")
 def _spread():
-    W = STRUCT.coupling(_fleet(20), ROUTES)
+    W = STRUCT.coupling(_fleet(), ROUTES)
     sp, asym = STRUCT.spread(W), STRUCT.asymmetry(W)
     assert sp > 0.3, (
         f"spread std/mean = {sp:.3f} is too flat. A flat geometric proxy "
@@ -76,7 +84,7 @@ def _spread():
         "an intercept-only null."
     )
     assert asym > 0.0, f"operator came out exactly symmetric (asym={asym:.4f})"
-    off = W[~torch.eye(20, dtype=torch.bool)]
+    off = W[~torch.eye(N_AGENTS, dtype=torch.bool)]
     nz = off[off > 0]
     return (
         f"spread={sp:.3f} asym={asym:.3f} "
@@ -226,8 +234,8 @@ def _binding():
 @check("test_ceiling_shares_are_a_partition")
 def _partition():
     p = DialParams()
-    fleet = _fleet(20)
-    d = decompose(STRUCT, ROUTES, fleet[:8], fleet[8:], p)
+    fleet = _fleet()
+    d = decompose(STRUCT, ROUTES, fleet[:16], fleet[16:], p)
     total = d.irreducible + d.own + d.peer
     assert abs(total - 1.0) < 1e-5, f"shares sum to {total}"
     assert min(d.irreducible, d.own, d.peer) >= 0.0
@@ -237,7 +245,7 @@ def _partition():
 @check("test_all_controllable_has_no_irreducible_share")
 def _all_controllable():
     p = DialParams()
-    fleet = _fleet(20)
+    fleet = _fleet()
     d = decompose(STRUCT, ROUTES, fleet, [], p)
     assert d.irreducible < 1e-9, f"irreducible = {d.irreducible:.4g} with no background"
     return "with no background participants the irreducible share is exactly 0"
@@ -246,7 +254,7 @@ def _all_controllable():
 @check("test_coordination_gap_grows_with_fleet_share")
 def _gap_grows():
     p = DialParams()
-    rows = fleet_scan(STRUCT, ROUTES, p, n_total=20)
+    rows = fleet_scan(STRUCT, ROUTES, p, n_total=N_AGENTS)
     gaps = [r.peer for r in rows]
     assert gaps[-1] > gaps[0] + 1e-6, f"gap did not grow: {gaps}"
     for a, b in zip(gaps, gaps[1:]):
@@ -260,8 +268,8 @@ def _gap_grows():
 @check("test_placebo_produces_no_excess_to_attribute")
 def _placebo_no_excess():
     p = DialParams(severity=3.0)
-    fleet = _fleet(20)
-    d = decompose(STRUCT, ROUTES, fleet[:8], fleet[8:], p, driver_value=0.0)
+    fleet = _fleet()
+    d = decompose(STRUCT, ROUTES, fleet[:16], fleet[16:], p, driver_value=0.0)
     assert d.g_mean == 1.0, f"g = {d.g_mean} on a dry day"
     return "on a dry day there is no excess to attribute, at any severity"
 
@@ -274,7 +282,8 @@ def main() -> int:
     print("=" * width)
     print("road_ns conformance   (I.7 -- offline, no simulator, no learning)")
     print(STRUCT.banner())
-    print(f"routes: {len(ROUTES)} (hop counts {sorted({len(r) for r in ROUTES})})")
+    print(f"instance: full-map loops, {len(ROUTES)} routes, N={N_AGENTS}, "
+          f"hop counts {sorted({len(r) for r in ROUTES})}")
     print("=" * width)
     failed = 0
     for name, ok, detail in RESULTS:

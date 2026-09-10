@@ -168,8 +168,15 @@ def fleet_scan(
     irreducible load disappears as the fleet share rises while peer load does
     not.
     """
-    gen = torch.Generator().manual_seed(seed)
-    assign = torch.randint(0, len(routes), (n_total,), generator=gen).tolist()
+    # road_traffic's own agent->loop assignment where it applies; a
+    # deterministic fallback otherwise.  Never random: the fleet layout is
+    # structure, and randomising it would make the decomposition a sample.
+    from road_ns.structure import loop_assignment
+
+    try:
+        assign = loop_assignment(n_total)
+    except ValueError:
+        assign = [i % len(routes) for i in range(n_total)]
     out = []
     for f in fractions:
         k = max(1, int(round(f * n_total)))
