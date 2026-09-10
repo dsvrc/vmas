@@ -30,6 +30,7 @@ from road_ns.dial import (
     driver_A,
     harm,
     loading,
+    loading_by_route,
     performance,
     sensitivity,
 )
@@ -96,6 +97,12 @@ class SeverityScenario(RoadTrafficScenario):
         self.struct = load_structure()
         self.routes = self.struct.declared_routes(self._route_set)
         self.sens = sensitivity(self.struct, self.ns).to(device)
+        # Precomputed once.  Both of these were being rebuilt every step, and
+        # the route lookup forced a device sync per step on top of that.
+        self._route_mask = self.struct.route_mask(self.routes).to(device)
+        self._loop_table = torch.tensor(
+            [x - 1 for x in PATH_TO_LOOP], device=device, dtype=torch.long
+        )
 
         agents = list(world.agents)
         self.n_ag = len(agents)
@@ -171,10 +178,7 @@ class SeverityScenario(RoadTrafficScenario):
         concerned.
         """
         pid = self.ref_paths_agent_related.path_id.to(torch.long)  # (B, N)
-        table = torch.tensor(
-            [x - 1 for x in PATH_TO_LOOP], device=pid.device, dtype=torch.long
-        )
-        return table[pid.clamp(0, table.numel() - 1)]
+        return self._loop_table[pid.clamp(0, self._loop_table.numel() - 1)]
 
     def _begin_step(self) -> None:
         """Compute the medium's state for this step.
@@ -196,9 +200,15 @@ class SeverityScenario(RoadTrafficScenario):
         a = driver_A(self._step, self.ns)
         g = dial_g(a, self.sens, self.ns)  # (B, A)
 
-        route_elems = [self.routes[int(r)] for r in self._route_of[0].tolist()]
-        u_der, binding = loading(load, g, self.struct, route_elems)
-        u_nom, _ = loading(load, torch.ones_like(g), self.struct, route_elems)
+        # PER WORLD.  VMAS draws path_id independently per parallel env, so
+        # using env 0's routes for all of them computes the loading of a fleet
+        # that does not exist -- and reads as a plausible number while doing it.
+        u_der, binding = loading_by_route(
+            load, g, self.struct, self._route_mask, self._route_of
+        )
+        u_nom, _ = loading_by_route(
+            load, torch.ones_like(g), self.struct, self._route_mask, self._route_of
+        )
 
         self._A = a
         self._u = u_der
@@ -350,7 +360,7 @@ class PactScenario(SeverityScenario):
         self._pred = torch.zeros(B, self.n_ag, device=device)
         self._trust = torch.zeros(B, self.n_ag, device=device)
         self._conf = torch.zeros(B, self.n_ag, device=device)
-        self._herd = 0.0
+        self._herd = torch.zeros(world.batch_dim, device=device)
 
         # Gate 1: the vectorised basis must equal the brute-force definition.
         # Index order and self-exclusion are exactly the kind of wiring bug that
@@ -397,7 +407,7 @@ class PactScenario(SeverityScenario):
         self._shift = steer(
             torch.ones_like(self._pred), self._pred, self._trust, self.pact_params
         )
-        self._herd = herd_index(self._route_of[0].tolist(), len(self.routes))
+        self._herd = herd_index(self._route_of, len(self.routes))  # (B,), no sync
 
     def _command(self, agent: Agent, index: int) -> Tensor:
         if not self.pact_enabled:
@@ -420,7 +430,7 @@ class PactScenario(SeverityScenario):
                 "pact_shift": one(self._shift),
                 "pact_updates": self.rls.n_updates[:, i : i + 1],
                 "pact_skipped": self.rls.n_skipped[:, i : i + 1],
-                "pact_herd": torch.full_like(self._u[:, i : i + 1], self._herd),
+                "pact_herd": self._herd.reshape(-1, 1).expand_as(self._u[:, i : i + 1]),
             }
         )
         return info

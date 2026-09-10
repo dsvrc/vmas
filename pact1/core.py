@@ -377,10 +377,17 @@ def herd_index(route_of: Sequence[int], n_routes: int) -> float:
     **Logged, never acted on.** Acting on it would make the method a mechanism
     rather than a per-agent estimator and break the decentralization claim.
     """
-    n = len(route_of)
+    ix = torch.as_tensor(route_of)
+    if ix.dim() == 1:
+        ix = ix.unsqueeze(0)
+    n = ix.shape[-1]
     if n <= 1:
         return 1.0
-    counts = torch.bincount(torch.as_tensor(route_of), minlength=n_routes).to(torch.float32)
-    shares = counts / counts.sum().clamp_min(1)
-    h = float((shares**2).sum())
-    return (h - 1.0 / n) / (1.0 - 1.0 / n)
+    counts = torch.zeros(ix.shape[0], n_routes, device=ix.device)
+    counts.scatter_add_(1, ix, torch.ones_like(ix, dtype=counts.dtype))
+    shares = counts / counts.sum(-1, keepdim=True).clamp_min(1)
+    h = (shares**2).sum(-1)
+    out = (h - 1.0 / n) / (1.0 - 1.0 / n)
+    # A tensor in, a tensor out: the caller logs this every step, and forcing a
+    # float here would sync the device on every step to print one number.
+    return out if isinstance(route_of, Tensor) and route_of.dim() > 1 else float(out[0])

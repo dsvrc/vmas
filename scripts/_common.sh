@@ -14,7 +14,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEVICE="${DEVICE:-cuda}"
-FRAMES="${FRAMES:-3000000}"
+
+#  Budget is set in ITERATIONS, because that is what you watch tick by.
+#
+#  frames = ITERS * BATCH, and BATCH/ENVS is the number of sequential simulator
+#  steps per iteration.  Raising BATCH does NOT reduce collection work -- the
+#  same frames are the same steps -- it reduces the number of optimizer rounds.
+#  The lever that actually shortens a run is ITERS.
+ITERS="${ITERS:-20}"
+BATCH="${BATCH:-60000}"
+FRAMES="${FRAMES:-$((ITERS * BATCH))}"
+
 SEEDS="${SEEDS:-0 1 2 3 4}"
 #  Every algorithm this BenchMARL checkout ships, minus `ensemble` (a wrapper,
 #  not an algorithm) and `mappo_ctde` (left over from the superseded PCW work).
@@ -44,6 +54,13 @@ COMMON=(
   "experiment.loggers=${LOGGERS}"
   "experiment.on_policy_n_envs_per_worker=${ENVS}"
   "experiment.off_policy_n_envs_per_worker=${ENVS}"
+  # Both batches, so ITERS means the same number of iterations whether the
+  # algorithm is on- or off-policy.  Left at BenchMARL's 6000 default, the
+  # off-policy arms would run 10x the iterations of the on-policy ones for the
+  # same frame budget, and the wall clocks would not be comparable.
+  "experiment.on_policy_collected_frames_per_batch=${BATCH}"
+  "experiment.off_policy_collected_frames_per_batch=${BATCH}"
+  "experiment.on_policy_minibatch_size=4096"
 )
 
 # $1 config name, $2 seed, $3 algo, $4 arm, rest: task overrides

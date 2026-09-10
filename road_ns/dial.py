@@ -193,6 +193,40 @@ def loading(
     return u, binding
 
 
+def loading_by_route(
+    element_load: Tensor,
+    g: Tensor,
+    structure: RoadStructure,
+    route_mask: Tensor,
+    route_of: Tensor,
+) -> Tuple[Tensor, Tensor]:
+    """``u_i`` for a BATCH of worlds, each with its own route assignment.
+
+    Same definition as :func:`loading` -- the max over the agent's own elements
+    -- but vectorised and, critically, **per world**.  VMAS draws ``path_id``
+    independently per parallel environment, so applying one world's routes to
+    all of them computes the loading of a fleet that does not exist.
+
+    Args:
+        element_load: ``(B, A)``
+        g:            ``(B, A)``
+        route_mask:   ``(P, A)`` bool, from ``RoadStructure.route_mask``
+        route_of:     ``(B, N)`` long, each agent's route index
+
+    Returns:
+        ``(u, binding)``, each ``(B, N)``.
+    """
+    ratio = element_load / (structure.capacity.reshape(1, -1) * g).clamp_min(1e-12)
+    mask = route_mask.to(ratio.device)[route_of]  # (B, N, A)
+    masked = ratio.unsqueeze(1).masked_fill(~mask, float("-inf"))
+    u, binding = masked.max(dim=-1)
+    # an agent with an empty route reads exactly zero rather than -inf
+    empty = ~mask.any(dim=-1)
+    u = torch.where(empty, torch.zeros_like(u), u)
+    binding = torch.where(empty, torch.zeros_like(binding), binding)
+    return u, binding
+
+
 def performance(u: Tensor, p: DialParams) -> Tensor:
     """``f(u) = 1 + alpha * u`` -- realized cost as a multiple of free-flow."""
     return 1.0 + p.alpha * u

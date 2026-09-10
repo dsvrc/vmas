@@ -349,6 +349,23 @@ class RoadStructure:
 
     # -- the declared operator (NS-1.2) -------------------------------------
 
+    def route_mask(self, routes: Sequence[Sequence[int]]) -> Tensor:
+        """``mask[p, a]`` -- does route ``p`` use element ``a``.  ``(P, A)`` bool.
+
+        Precomputed so the per-step loading can be a single vectorised max over
+        a gathered mask, with no Python loop over agents and no device sync.
+        """
+        key = "_route_mask_cache"
+        cached = getattr(self, key, None)
+        if cached is not None and cached.shape[0] == len(routes):
+            return cached
+        m = torch.zeros(len(routes), self.n_elements, dtype=torch.bool)
+        for p, r in enumerate(routes):
+            for a in r:
+                m[p, a] = True
+        setattr(self, key, m)
+        return m
+
     def route_incidence(self, routes: Sequence[Sequence[int]]) -> Tensor:
         """``M[a, p] = 1`` if route ``p`` uses element ``a``.  ``(A, P)``."""
         M = torch.zeros(self.n_elements, len(routes), dtype=torch.float32)
