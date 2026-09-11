@@ -196,7 +196,23 @@ class SimpleNsClass(VmasClass):
         experiment.save_folder so each arm gets its own file.
         """
         path = os.environ.get("SIMPLE_NS_DEBUG_CSV")
-        if not path or not row:
+        if not path:
+            #  Say so ONCE.  A diagnostic that silently does not exist is worse
+            #  than no diagnostic: the first run of this looked like the writer
+            #  was broken when the variable simply was not set, because the run
+            #  predated simple_ns/run.py setting it.
+            if not getattr(self, "_debug_warned", False):
+                self._debug_warned = True
+                print(
+                    "[simple_ns] SIMPLE_NS_DEBUG_CSV is unset, so no debug CSV "
+                    "will be written. simple_ns/run.py sets it from "
+                    "experiment.save_folder -- if you are not launching through "
+                    "it, export it yourself. The same columns are still in the "
+                    "experiment's own logger under ns/* and pact/*.",
+                    flush=True,
+                )
+            return
+        if not row:
             return
         try:
             f = Path(path)
@@ -221,8 +237,17 @@ class SimpleNsClass(VmasClass):
                 if new:
                     w.writeheader()
                 w.writerow(record)
-        except Exception:  # noqa: BLE001 -- diagnostics must never kill a run
-            pass
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must never kill a run
+            #  Never fatal, but never silent either.  Reported once, with the
+            #  reason, so a missing file is a message rather than a mystery.
+            if not getattr(self, "_debug_failed", False):
+                self._debug_failed = True
+                print(
+                    f"[simple_ns] debug CSV disabled: {type(exc).__name__}: {exc} "
+                    f"(path={path!r}). The run continues; ns/* and pact/* are "
+                    "still in the experiment's own logger.",
+                    flush=True,
+                )
 
     @staticmethod
     def _groups_with_info(batch: TensorDictBase) -> List[str]:
