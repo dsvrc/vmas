@@ -9,6 +9,8 @@ class TaskConfig:
     map_type: str = MISSING
     is_partial_observation: bool = MISSING
     n_nearing_agents_observed: int = MISSING
+    is_observe_vertices: bool = MISSING
+    is_add_noise: bool = MISSING
 
     # --- the severity dial (TASK physics: reaches EVERY arm) ---------------
     ns_severity: float = MISSING

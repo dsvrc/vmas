@@ -22,6 +22,12 @@ map_type: "1"                # the entire map: its seven reference loops are the
                              # 1.57x and is flat.
 is_partial_observation: True
 n_nearing_agents_observed: 2
+is_observe_vertices: false   # observe peers as CENTRE POINTS, not 4 vertices
+                             # each: a quarter of the per-agent observation
+                             # work.  A task-level change, so it is applied to
+                             # every arm and belongs in the ablation table.
+is_add_noise: false          # observation noise off: it costs a random draw
+                             # per agent per step and is not part of the claim.
 
 # ---------------------------------------------------------------------------
 # The severity dial.  TASK physics: this block reaches EVERY arm (NS-3.1).

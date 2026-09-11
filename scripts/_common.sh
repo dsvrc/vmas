@@ -37,7 +37,16 @@ SEEDS="${SEEDS:-0 1 2 3 4}"
 #  against pact WITHIN an algorithm, which is the comparison that carries the
 #  claim anyway.
 ALGOS="${ALGOS:-ippo mappo iddpg maddpg isac masac iql qmix vdn}"
-ENVS="${ENVS:-60}"
+#  road_traffic's per-step cost is dominated by PYTHON LOOPS OVER AGENTS
+#  (interX collision checks in reward(), and the observation builder), each
+#  launching small tensor ops over the batch.  So the cost is roughly flat in
+#  batch width and linear in the number of sequential steps -- which means more
+#  parallel envs is nearly free and is the single biggest lever here.
+#
+#  BATCH/ENVS is the number of sequential steps per iteration: 60000/600 = 100,
+#  against 1000 at ENVS=60.  Same frames, a tenth of the Python-loop
+#  iterations.  600 is also what fine_tuned/vmas/conf/config.yaml uses.
+ENVS="${ENVS:-600}"
 LOGGERS="${LOGGERS:-[csv]}"
 EXTRA="${EXTRA:-}"
 OUT_ROOT="${OUT_ROOT:-runs/road_ns}"
