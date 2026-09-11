@@ -258,11 +258,20 @@ class SeverityMixin:
         #
         # `self_element` is the I.2 fix: u is PEER loading.
         se = here if self._exclude_self else None
+        # Built ONCE: the derated and nominal loadings run over the same routes,
+        # and this (B, N, A) gather is the dominant cost of the medium.
+        mask = self._route_mask[self._ns_route]
         u_der, binding = loading_by_route(
-            load, g, self.struct, self._route_mask, self._ns_route, se
+            load, g, self.struct, self._route_mask, self._ns_route, se, mask
         )
         u_nom, _ = loading_by_route(
-            load, torch.ones_like(g), self.struct, self._route_mask, self._ns_route, se
+            load,
+            torch.ones_like(g),
+            self.struct,
+            self._route_mask,
+            self._ns_route,
+            se,
+            mask,
         )
 
         self._A = a

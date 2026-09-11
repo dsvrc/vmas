@@ -222,6 +222,8 @@ class LaneletFlow(BaseScenario):
         self._dist = torch.zeros(B, N, N, **f)
         self._peer_idx = torch.zeros(B, N, max(1, min(self.k_peers, N - 1)), **li)
         self._steer_prev = torch.zeros(B, N, **f)
+        self._d_steer = torch.zeros(B, N, **f)
+        self._pending: Optional[Tensor] = None
         self._collided = torch.zeros(B, N, device=device, dtype=torch.bool)
         self._offroad = torch.zeros(B, N, device=device, dtype=torch.bool)
         self._lap = torch.zeros(B, N, device=device, dtype=torch.bool)
@@ -347,6 +349,15 @@ class LaneletFlow(BaseScenario):
             self._bg_route[sl] = self._loop_table[bpid]
             self._bg_prog[sl] = self._rand(b, M) * self.K
 
+        # `Environment._reset` asks for observations immediately, so the
+        # read-out has to describe the state we just placed.  A partial reset
+        # refreshes the whole fleet: the other worlds are unchanged, so
+        # recomputing them costs a step and changes nothing.
+        self._steer_prev[sl] = 0.0
+        self._d_steer[sl] = 0.0
+        self._pending = None
+        self._refresh()
+
     def _respawn(self, mask: Tensor) -> None:
         """Re-place the agents in ``mask`` -- vectorised, episode continues.
 
@@ -435,6 +446,19 @@ class LaneletFlow(BaseScenario):
     def _positions(self) -> Tensor:
         return torch.stack([a.state.pos for a in self.world.agents], dim=1)
 
+    def _cache_kinematics(self) -> None:
+        """Stack pose and velocity ONCE per step.
+
+        ``observation`` and ``reward`` are called once PER AGENT, so anything
+        fleet-wide done inside them is done N times: the per-agent read-out used
+        to re-stack all N positions and all N velocities on every call, which is
+        O(N^2) python per step and was 43% of the whole step in the profile.
+        """
+        self._pos = torch.stack([a.state.pos for a in self.world.agents], dim=1)
+        self._vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+        self._rot = torch.stack([a.state.rot[:, 0] for a in self.world.agents], dim=1)
+        self._cos, self._sin = self._rot.cos(), self._rot.sin()
+
     def _localise(self, pos: Tensor) -> None:
         """Progress, lateral offset and heading error, for every agent at once.
 
@@ -464,7 +488,7 @@ class LaneletFlow(BaseScenario):
         self._lat = rel.norm(dim=-1)
 
         yaw = self._yaw_flat[i0]
-        rot = torch.stack([a.state.rot[:, 0] for a in self.world.agents], dim=1)
+        rot = self._rot
         self._head_err = torch.atan2(
             torch.sin(rot - yaw), torch.cos(rot - yaw)
         )  # wrapped to [-pi, pi]
@@ -486,119 +510,159 @@ class LaneletFlow(BaseScenario):
             self._route_of * self.K + self._prog
         ]
 
-    def _begin_flow_step(self) -> None:
-        pos = self._positions()
-        self._localise(pos)
-        self._pairwise(pos)
-        self._advance_background()
+    def _refresh(self) -> None:
+        """Localise the fleet and rebuild the read-out.  POST-physics.
+
+        ``vmas.Environment.step`` runs
+        ``env_process_action -> world.step -> post_step -> observation/reward``,
+        so this belongs in ``post_step``: that is the only point where the state
+        the agent is told about is the state it is actually in.
+
+        It used to run in ``process_action``, i.e. before the physics, and three
+        things were wrong because of it.  The observation reported post-step
+        POSITIONS against a pre-step progress index and lateral offset.  The
+        progress reward measured the PREVIOUS step's movement, so the last step
+        of every episode was never paid.  And the steering-rate penalty compared
+        this step's steering against itself and was therefore identically zero.
+        """
+        self._cache_kinematics()
+        self._localise(self._pos)
+        self._pairwise(self._pos)
+        self._build_readout()
 
     # VMAS calls process_action once per agent, in order.  Agent 0 is the hook.
     def process_action(self, agent: Agent) -> None:
         if agent is self.world.agents[0]:
-            self._begin_flow_step()
+            # Deferred from the previous step so that the collision and
+            # off-road penalties were actually paid before the vehicle was
+            # moved, and so the read-out described the state that earned them.
+            if self._pending is not None:
+                self._respawn(self._pending)
+                self._pending = None
+            self._advance_background()
 
     def post_step(self) -> None:
-        self._steer_prev = torch.stack(
-            [a.action.u[:, 1] for a in self.world.agents], dim=1
-        )
+        cur = torch.stack([a.action.u[:, 1] for a in self.world.agents], dim=1)
+        self._d_steer = (cur - self._steer_prev).abs()
+        self._steer_prev = cur
+        self._refresh()
         if self.do_respawn:
             mask = self._collided | self._offroad
             if self.reroute_on_lap:
                 mask = mask | self._lap
-            self._respawn(mask)
+            self._pending = mask if bool(mask.any()) else None
 
     # ------------------------------------------------------------------
     #  read-out
     # ------------------------------------------------------------------
 
-    def _ego(self, vec: Tensor, i: int) -> Tensor:
-        """Rotate a world-frame ``(B, ..., 2)`` into agent ``i``'s body frame."""
-        rot = self.world.agents[i].state.rot[:, 0]
-        c, s = rot.cos(), rot.sin()
-        shape = (-1,) + (1,) * (vec.dim() - 2)
-        c, s = c.reshape(*shape, 1), s.reshape(*shape, 1)
-        x, y = vec[..., :1], vec[..., 1:]
-        return torch.cat([c * x + s * y, -s * x + c * y], dim=-1)
+    def _to_ego(self, vec: Tensor) -> Tensor:
+        """Rotate world-frame ``(B, N, ..., 2)`` into each agent's body frame.
 
-    def observation(self, agent: Agent):
-        i = self.world.agents.index(agent)
-        pos = self._positions()
-        vel = torch.stack([a.state.vel for a in self.world.agents], dim=1)
+        One cos/sin for the fleet, reused for every field.  The per-agent version
+        recomputed them on all four of its calls, 4N times a step.
+        """
+        extra = vec.dim() - 3
+        shape = self._cos.shape + (1,) * extra
+        c, s = self._cos.reshape(shape), self._sin.reshape(shape)
+        x, y = vec[..., 0], vec[..., 1]
+        return torch.stack([c * x + s * y, -s * x + c * y], dim=-1)
 
-        own_vel = self._ego(vel[:, i], i) / self.max_speed
+    def _build_readout(self) -> None:
+        """The whole fleet's observation and reward, in ONE pass.
 
-        steps = (
-            torch.arange(1, self.n_lookahead + 1, device=pos.device) * self.look_stride
-        )
-        idx = self._route_of[:, i : i + 1] * self.K + (
-            self._prog[:, i : i + 1] + steps
-        ) % self.K
-        ahead = self._point_flat[idx] - pos[:, i : i + 1]  # (B, L, 2)
-        ahead = self._ego(ahead, i).flatten(1) / self._lane_half
+        VMAS asks for these one agent at a time, so the per-agent versions are
+        now pure slices of what this computes.  Same numbers, N times less
+        python and N times fewer kernel launches.
+        """
+        pos, vel = self._pos, self._vel
+        K = self.K
+        route, prog = self._route_of, self._prog
+        i0 = route * K + prog
+        hw = self._halfw_flat[i0]
 
-        hw = self._halfw_flat[self._route_of[:, i] * self.K + self._prog[:, i]]
-        lat = (self._lat[:, i] / hw).unsqueeze(-1)
-        head = self._head_err[:, i : i + 1] / math.pi
+        # -- observation ----------------------------------------------------
+        own = self._to_ego(vel) / self.max_speed  # (B,N,2)
 
-        idxp = self._peer_idx[:, i]  # (B, k)
-        rel = torch.gather(
-            pos - pos[:, i : i + 1], 1, idxp.unsqueeze(-1).expand(-1, -1, 2)
-        )
-        relv = torch.gather(
-            vel - vel[:, i : i + 1], 1, idxp.unsqueeze(-1).expand(-1, -1, 2)
-        )
-        d = torch.gather(self._dist[:, i], 1, idxp)
+        steps = torch.arange(
+            1, self.n_lookahead + 1, device=pos.device
+        ) * self.look_stride
+        idx = route.unsqueeze(-1) * K + (prog.unsqueeze(-1) + steps) % K  # (B,N,L)
+        ahead = self._point_flat[idx] - pos.unsqueeze(2)  # (B,N,L,2)
+        ahead = self._to_ego(ahead).flatten(2) / self._lane_half
+
+        lat = (self._lat / hw).unsqueeze(-1)
+        head = (self._head_err / math.pi).unsqueeze(-1)
+
+        # (B,N,N,2): [b,i,j] is peer j seen from i
+        rel_all = pos.unsqueeze(1) - pos.unsqueeze(2)
+        relv_all = vel.unsqueeze(1) - vel.unsqueeze(2)
+        pick = self._peer_idx.unsqueeze(-1).expand(-1, -1, -1, 2)  # (B,N,k,2)
+        rel = torch.gather(rel_all, 2, pick)
+        relv = torch.gather(relv_all, 2, pick)
+        d = torch.gather(self._dist, 2, self._peer_idx)  # (B,N,k)
         # II.2's masking of distant peers, as road_traffic does it
-        seen = (d < self._near_agent_hi * 4).to(torch.float32).unsqueeze(-1)
+        seen = (d < self._near_agent_hi * 4).to(pos.dtype).unsqueeze(-1)
         peer = torch.cat(
             [
-                (self._ego(rel, i) * seen).flatten(1) / self._lane_half,
-                (self._ego(relv, i) * seen).flatten(1) / self.max_speed,
+                (self._to_ego(rel) * seen).flatten(2) / self._lane_half,
+                (self._to_ego(relv) * seen).flatten(2) / self.max_speed,
             ],
             dim=-1,
         )
-        return torch.cat([own_vel, ahead, lat, head, peer], dim=-1)
+        self._obs = torch.cat([own, ahead, lat, head, peer], dim=-1)  # (B,N,D)
 
-    def reward(self, agent: Agent):
-        i = self.world.agents.index(agent)
-        K = self.K
-
+        # -- reward ---------------------------------------------------------
         # progress along the route, wrap-safe, normalised by the most a vehicle
         # could possibly travel in one step -- road_traffic's own normalisation
-        d_idx = (self._prog[:, i].long() - self._prog_prev[:, i].long() + K // 2) % K - K // 2
-        metres = d_idx.to(torch.float32) * self._spacing[self._route_of[:, i]]
+        d_idx = (prog.long() - self._prog_prev.long() + K // 2) % K - K // 2
+        metres = d_idx.to(pos.dtype) * self._spacing[route]
         rew = metres / (self.max_speed * self.world.dt) * R_PROGRESS
 
         # speed, projected on the route direction
-        v = self.world.agents[i].state.vel.norm(dim=-1)
-        v_proj = v * self._head_err[:, i].cos()
+        v = vel.norm(dim=-1)
+        v_proj = v * self._head_err.cos()
         rew = rew + torch.where(v_proj > 0, 1.0, 2.0) * v_proj / self.max_speed * R_VEL
 
-        # too close to peers
-        near = _exp_decreasing(
-            self._dist[:, i], self._near_agent_lo, self._near_agent_hi
-        )
+        # too close to peers.  The diagonal is +inf, so its term is exactly 0.
+        near = _exp_decreasing(self._dist, self._near_agent_lo, self._near_agent_hi)
         rew = rew + near.nan_to_num(0.0).sum(dim=-1) * P_NEAR_AGENTS
 
         # too close to the lane boundary, and off it
-        hw = self._halfw_flat[self._route_of[:, i] * K + self._prog[:, i]]
-        clearance = (hw - self.agent_width / 2 - self._lat[:, i]).clamp_min(0.0)
+        clearance = (hw - self.agent_width / 2 - self._lat).clamp_min(0.0)
         rew = rew + _exp_decreasing(clearance, 0.0, self._near_b_hi) * P_NEAR_BOUNDARY
-        rew = rew + self._offroad[:, i].to(torch.float32) * P_COLLIDE_BOUNDARY
+        rew = rew + self._offroad.to(pos.dtype) * P_COLLIDE_BOUNDARY
 
         # deviation from the centre line
-        rew = rew + self._lat[:, i] / self._deviate_w * P_DEVIATE
+        rew = rew + self._lat / self._deviate_w * P_DEVIATE
 
-        # steering rate
-        d_steer = (self.world.agents[i].action.u[:, 1] - self._steer_prev[:, i]).abs()
-        rew = rew + (d_steer / (2 * self.max_steering)) * P_CHANGE_STEERING
+        # steering rate, against the PREVIOUS step's steering
+        rew = rew + (self._d_steer / (2 * self.max_steering)) * P_CHANGE_STEERING
 
         # collision
-        rew = rew + self._collided[:, i].to(torch.float32) * P_COLLIDE_AGENTS
+        rew = rew + self._collided.to(pos.dtype) * P_COLLIDE_AGENTS
 
         # time: paid for moving forward, charged for moving backward
         rew = rew + torch.where(v_proj > 0, 1.0, -1.0) * v / self.max_speed * P_TIME
-        return rew
+        self._rew = rew  # (B,N)
+
+        # -- info ------------------------------------------------------------
+        # Built once for the fleet and sliced per agent, for the same reason the
+        # observation is: the dtype casts below allocate, and doing them inside
+        # `info` did it N times a step.
+        self._info = {
+            "flow_lateral": self._lat,
+            "flow_offroad": self._offroad.to(pos.dtype),
+            "flow_collided": self._collided.to(pos.dtype),
+            "flow_speed": v,
+            "flow_route": self._route_of.to(pos.dtype),
+        }
+
+    def observation(self, agent: Agent):
+        return self._obs[:, self.world.agents.index(agent)]
+
+    def reward(self, agent: Agent):
+        return self._rew[:, self.world.agents.index(agent)]
 
     def done(self):
         """Truncation only.
@@ -617,11 +681,4 @@ class LaneletFlow(BaseScenario):
 
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         i = self.world.agents.index(agent)
-        one = lambda t: t[:, i : i + 1].to(torch.float32)  # noqa: E731
-        return {
-            "flow_lateral": one(self._lat),
-            "flow_offroad": one(self._offroad),
-            "flow_collided": one(self._collided),
-            "flow_speed": self.world.agents[i].state.vel.norm(dim=-1, keepdim=True),
-            "flow_route": one(self._route_of),
-        }
+        return {k: v[:, i : i + 1] for k, v in self._info.items()}

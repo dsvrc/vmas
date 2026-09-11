@@ -28,14 +28,25 @@ export ROAD_NS_MAP=$(python -c "import vmas,pathlib;print(pathlib.Path(vmas.__fi
 
 | task | fleet | envs | ms/frame | 1.2 M frames |
 |---|---|---|---|---|
-| `road_ns/lanelet_flow` blind | 16 + 24 bg | 600 | **0.271** | **5.4 min** |
-| `road_ns/lanelet_flow` pact | 16 + 24 bg | 600 | 0.348 | 7.0 min |
-| `road_ns/lanelet_flow` blind | 40 | 600 | 0.838 | 16.8 min |
+| `road_ns/lanelet_flow` blind | 16 + 24 bg | 600 | **0.159** | **3.2 min** |
+| `road_ns/lanelet_flow` pact | 16 + 24 bg | 600 | 0.178 | 3.6 min |
+| `road_ns/lanelet_flow` pact | 16 + 24 bg | 2400 | 0.092 | 1.8 min |
+| `road_ns/lanelet_flow` blind | 40 | 600 | 0.395 | 7.9 min |
 | `road_ns/road_traffic` | 40 | 16 | 173 | **58 h** |
 | `road_ns/road_traffic` | 16 | 64 | 29.8 | 10 h |
 
-Measured on CPU through `vmas.make_env` with random actions. A full config
-(5 seeds x 9 algorithms x 2 arms = 90 runs) is about **9 hours on one CPU core**.
+Measured on CPU through `vmas.make_env` with random actions; this is the
+**environment** only, not the optimizer. A BenchMARL iteration is 100 sequential
+simulator steps plus 675 gradient steps (`on_policy_n_minibatch_iters: 45` x 15
+minibatches), so read the real wall clock off the run's own `timers/` columns.
+
+Where the remaining env step goes, at the committed config: the
+`KinematicBicycle` rk4 28%, the read-out and localisation 27%, the medium 10%,
+PACT 8%, `_integrate_state` 8%, respawn 5%. `flow_integration: euler` takes the
+first of those down ~4x for a ~14% overall gain and is the only cheap win left,
+but it changes the vehicle: at `dt=0.05` a full-lock step turns about 20 degrees,
+which is exactly the regime where rk4 and euler diverge. It belongs in the
+ablation, not in the default.
 
 Run the sweep on `lanelet_flow`; run `road_traffic` once at low N as a
 provenance row (`scripts/cfg_provenance.sh`).

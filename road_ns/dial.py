@@ -200,6 +200,7 @@ def loading_by_route(
     route_mask: Tensor,
     route_of: Tensor,
     self_element: Optional[Tensor] = None,
+    mask: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """``u_i`` for a BATCH of worlds, each with its own route assignment.
 
@@ -242,13 +243,18 @@ def loading_by_route(
         self_element: ``(B, N)`` long, the element each agent occupies, or None
                       to keep the agent's own unit in the load (the pre-fix
                       behaviour, kept only so the ablation can reproduce it).
+        mask:         ``(B, N, A)`` bool, a precomputed ``route_mask[route_of]``.
+                      The derated and nominal loadings are taken over the same
+                      routes, so building it twice is the most expensive
+                      redundant work on the per-step path.
 
     Returns:
         ``(u, binding)``, each ``(B, N)``.
     """
     denom = (structure.capacity.reshape(1, -1) * g).clamp_min(1e-12)
     ratio = element_load / denom
-    mask = route_mask.to(ratio.device)[route_of]  # (B, N, A)
+    if mask is None:
+        mask = route_mask.to(ratio.device)[route_of]  # (B, N, A)
     masked = ratio.unsqueeze(1).masked_fill(~mask, float("-inf"))
 
     if self_element is not None:

@@ -16,13 +16,30 @@ cd "$(dirname "$0")/.."
 
 DEVICE="${DEVICE:-cuda}"
 
+#  SPLIT THE DEVICES.  These default to DEVICE, but they are separate knobs and
+#  on this host the best setting is usually NOT the same for both.
+#
+#  lanelet_flow's per-step work is many SMALL tensor ops -- VMAS calls
+#  process_action / observation / reward once per agent, and the vehicle dynamics
+#  is an rk4 over (B,) state -- so on a GPU it is kernel-LAUNCH bound rather than
+#  throughput bound, and 600 envs is not wide enough to amortise the launches.
+#  Training, by contrast, is 675 optimizer steps per iteration and is exactly
+#  what a GPU is for.  So try:
+#
+#      SAMPLING_DEVICE=cpu TRAIN_DEVICE=cuda bash scripts/cfg_main.sh
+#
+#  and compare against DEVICE=cuda on a two-iteration run before committing the
+#  sweep.  Which wins depends on the machine; measure, do not assume.
+SAMPLING_DEVICE="${SAMPLING_DEVICE:-$DEVICE}"
+TRAIN_DEVICE="${TRAIN_DEVICE:-$DEVICE}"
+
 #  WHICH HOST.  Both carry the identical medium -- same map, same capacities,
 #  same operator, same dial, same PACT -- and differ only in the vehicle model.
 #
-#      road_ns/lanelet_flow   the sweep host.   0.24 ms/frame at N=16/600 envs
-#      road_ns/road_traffic   SigmaRL's own.  173    ms/frame at N=40/16  envs
+#      road_ns/lanelet_flow   the sweep host.   0.155 ms/frame at N=16/600 envs
+#      road_ns/road_traffic   SigmaRL's own.  173     ms/frame at N=40/16  envs
 #
-#  Measured, CPU, via vmas.make_env.  1.2M frames is 5 minutes against 58 HOURS.
+#  Measured, CPU, via vmas.make_env.  1.2M frames is 3 minutes against 58 HOURS.
 #  road_traffic is kept for the provenance row, run at low N (cfg_provenance.sh).
 TASK="${TASK:-road_ns/lanelet_flow}"
 
@@ -50,13 +67,19 @@ SEEDS="${SEEDS:-0 1 2 3 4}"
 ALGOS="${ALGOS:-ippo mappo iddpg maddpg isac masac iql qmix vdn}"
 
 #  For lanelet_flow the per-step work is vectorised over the batch, so the cost
-#  per FRAME falls as the batch widens and more parallel envs is close to free.
+#  per FRAME falls as the batch widens.  That was NOT true of road_traffic, whose
+#  dominant cost is a python loop over (env, agent) pairs and therefore does not
+#  amortise: if you set TASK=road_ns/road_traffic, drop ENVS as well.
 #
-#  That was NOT true of road_traffic, and the comment here used to claim it was.
-#  Its dominant cost is a python reset loop over (env, agent) pairs, which
-#  scales linearly with envs and therefore does not amortise at all -- measured
-#  30 ms/frame at 64 envs against 56 at 16, a 1.9x gain for 4x the envs.
-#  If you set TASK=road_ns/road_traffic, drop ENVS as well.
+#  600 envs against BATCH=60000 is 100 sequential simulator steps per iteration.
+#
+#  Raising ENVS keeps cutting wall clock -- measured 0.155 ms/frame at 600,
+#  0.095 at 2400, 0.075 at 4800 -- but it is NOT free: at a fixed frame budget
+#  it buys fewer DISTINCT timesteps.  1.2M frames is 2000 sequential steps at
+#  600 envs (10 episodes per env at max_steps=200) and only 250 at 4800 (1.25
+#  episodes).  On-policy learning needs sequential coverage, not 4800
+#  near-identical copies of the same 250 steps.  Raise ENVS and ITERS together,
+#  or not at all.
 ENVS="${ENVS:-600}"
 LOGGERS="${LOGGERS:-[csv]}"
 EXTRA="${EXTRA:-}"
@@ -67,8 +90,8 @@ COMMON=(
   "experiment.render=false"
   "experiment.checkpoint_at_end=true"
   "experiment.max_n_frames=${FRAMES}"
-  "experiment.sampling_device=${DEVICE}"
-  "experiment.train_device=${DEVICE}"
+  "experiment.sampling_device=${SAMPLING_DEVICE}"
+  "experiment.train_device=${TRAIN_DEVICE}"
   "experiment.loggers=${LOGGERS}"
   "experiment.on_policy_n_envs_per_worker=${ENVS}"
   "experiment.off_policy_n_envs_per_worker=${ENVS}"
