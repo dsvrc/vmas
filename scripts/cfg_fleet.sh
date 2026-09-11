@@ -14,6 +14,6 @@
 #  evidence against the mechanism even if the headline row looks good.
 
 source "$(dirname "$0")/_common.sh"
-for n in 8 16 24 32; do
+for n in 4 8 12 16; do
   run_config "fleet_n${n}" task.ns_severity=1.0 "task.n_agents=${n}"
 done

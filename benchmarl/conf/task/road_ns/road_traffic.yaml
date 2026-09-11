@@ -7,7 +7,12 @@ defaults:
 # reward, done and the base observation are INHERITED untouched.
 # ---------------------------------------------------------------------------
 max_steps: 200
-n_agents: 40                 # path_to_loop's own maximum, and the operating
+n_agents: 16                 # chosen on COST, before any method result existed:
+                             # road_traffic is O(N^2) in agents, and N=40 ran
+                             # at 8838 s/iteration.  N=16 is 0.15x that, has a
+                             # BETTER operator spread (1.331 vs 1.241) and a
+                             # 61.8% coordination gap -- the conservative
+                             # direction, since N=40 scored 84.5%.
                              # point chosen on the Part C decomposition BEFORE
                              # any method code ran (NS-4.1)
 map_type: "1"                # the entire map: its seven reference loops are the

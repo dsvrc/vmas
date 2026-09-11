@@ -38,7 +38,7 @@ STRUCT = load_structure()
 #: (NS-4.1): it is the only route set that satisfies NS-1.2's spread
 #: requirement while keeping loading in URB's measured regime.
 ROUTES = STRUCT.declared_routes("loops")
-N_AGENTS = 40
+N_AGENTS = 16
 
 
 def check(name: str):

@@ -44,7 +44,7 @@ def dial_table(struct, sigma: float) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--agents", type=int, default=40)
+    ap.add_argument("--agents", type=int, default=16)
     ap.add_argument("--severities", type=float, nargs="+", default=[0.5, 1.0, 3.0])
     ap.add_argument("--csv", type=str, default=None)
     args = ap.parse_args()

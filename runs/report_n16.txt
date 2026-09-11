@@ -1,0 +1,39 @@
+﻿========================================================================================
+road_ns -- I.6 mandatory report   (offline: no policy, no training, no simulator)
+========================================================================================
+road structure  elements=104 classes=3 capacity in [2.51, 24.63] veh (median 6.37), multi-lane 92%
+                classes: ['highway:multi', 'urban:multi', 'urban:single']
+                map: C:\Users\chinnu\Downloads\vmas\vmas\scenarios_data\road_traffic\road_traffic_cpm_lab.xml
+routes: 7   operator: spread=1.331 asym=0.059 zero-diagonal=True
+
+-- the dial ------------------------------------------------------
+   sigma  cap removed  peak/trough   placebo            g range
+     0.5       1.75%       1.148x   51/100  [0.871, 1.000]
+       1       3.50%       1.347x   51/100  [0.743, 1.000]  <- HCM anchor
+       3      10.50%       4.393x   51/100  [0.228, 1.000]  <- beyond-physical
+
+-- the ceiling decomposition (I.5) -------------------------------
+       fleet   irred     own    PEER dec.ceil  u_mean      g
+  s=0.5     3/16     60.6%   39.4%    0.0%    39.4%   0.066  0.930
+  s=0.5     6/16     56.5%   41.0%    2.5%    43.5%   0.068  0.930
+  s=0.5    10/16     30.8%   38.8%   30.4%    69.2%   0.068  0.930
+  s=0.5    13/16     14.4%   39.7%   45.9%    85.6%   0.069  0.930
+  s=0.5    16/16      0.0%   37.8%   62.2%   100.0%   0.068  0.930
+  s=1       3/16     60.6%   39.4%    0.0%    39.4%   0.076  0.860
+  s=1       6/16     56.4%   41.2%    2.4%    43.6%   0.078  0.860
+  s=1      10/16     30.8%   39.0%   30.2%    69.2%   0.077  0.860
+  s=1      13/16     14.1%   40.0%   45.9%    85.9%   0.078  0.860
+  s=1      16/16      0.0%   38.2%   61.8%   100.0%   0.078  0.860
+  s=3       3/16     60.3%   39.7%    0.0%    39.7%   0.199  0.580
+  s=3       6/16     55.6%   43.2%    1.3%    44.4%   0.209  0.580
+  s=3      10/16     31.0%   41.1%   28.0%    69.0%   0.197  0.580
+  s=3      13/16     11.9%   42.4%   45.7%    88.1%   0.202  0.580
+  s=3      16/16      0.0%   40.7%   59.3%   100.0%   0.195  0.580
+
+----------------------------------------------------------------------------------------
+HEADLINE  sigma=1, 6/16 controllable:  irreducible 56.4% / own 41.2% / PEER 2.4%
+          URB reference at the same 40% controllable share: 42.6 / 16.5 / 40.8
+          loading u_mean=0.078 -- I.6 requires this: a medium far below its
+          limit cannot express a capacity loss however large sigma grows.
+
+wrote 18 rows to runs\road_ns_ceiling.csv
