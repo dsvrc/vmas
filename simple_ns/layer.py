@@ -136,7 +136,8 @@ class ExertionMixin:
             max(getattr(world, "x_semidim", None) or 1.0,
                 getattr(world, "y_semidim", None) or 1.0)
         )
-        self._load_norm = self.coupling.load_norm(self._spawn_reference(world))
+        self._spawn_ref = self._spawn_reference(world)
+        self._load_norm = self.coupling.load_norm(self._spawn_ref)
 
         B, N, r, D = batch_dim, self.n_ag, self.ns.n_types, self._action_dim
         f = dict(device=device, dtype=torch.float32)
@@ -475,13 +476,25 @@ class PactMixin(ExertionMixin):
             )
 
         self._dim = 1 if self._channels == "intercept" else 1 + self.ns.n_types
-        self._ref, self._scale = self.coupling.geometric_reference(arena=self._arena)
+        # P-3.3, on the host's OWN geometry -- see Coupling.geometric_reference
+        self._ref, self._scale = self.coupling.geometric_reference(self._spawn_ref)
         # One estimator per parallel world: each is an independent deployment.
         self.rls = RLS(
             self.n_ag, self._dim, self.pact_params, batch=world.batch_dim, device=device
         )
 
         B = world.batch_dim
+        #  psi(t-1), kept because the estimator must be updated with the row that
+        #  PRODUCED the target it is being shown -- see _after_disturbance.
+        self._psi_prev = torch.zeros(B, self.n_ag, self._dim, device=device)
+        self._have_prev = False
+        #  II.10's instrument panel, maintained online.
+        self._fit_sse = torch.zeros(B, self.n_ag, device=device)
+        self._null_sse = torch.zeros(B, self.n_ag, device=device)
+        self._ybar = torch.zeros(B, self.n_ag, device=device)
+        self._fit_gain = torch.zeros(B, self.n_ag, device=device)
+        self._beta_cos = torch.zeros(B, self.n_ag, device=device)
+        self._beta_err = torch.zeros(B, self.n_ag, device=device)
         self._pred = torch.zeros(B, self.n_ag, device=device)
         self._trust = torch.zeros(B, self.n_ag, device=device)
         self._conf = torch.zeros(B, self.n_ag, device=device)
@@ -521,7 +534,24 @@ class PactMixin(ExertionMixin):
         # II.2: the target is the agent's own residual, ONE STEP STALE.  It never
         # sees another agent's residual (P-4.1).
         y = self._y_prev.clamp(-self.pact_params.y_clip, self.pact_params.y_clip)
-        self.rls.update(psi, y)
+
+        #  PAIR THE TARGET WITH THE ROW THAT PRODUCED IT.
+        #
+        #  y(t-1) is the residual the agent measured at t-1, and it was generated
+        #  by psi(t-1) -- the channels built from u(t-2) and pos(t-1).  Updating
+        #  with (psi(t), y(t-1)) regresses the target on the WRONG ROW: psi(t) is
+        #  built from u(t-1), an independent draw, so the regressor is close to
+        #  noise with respect to the target.  It was doing exactly that, and the
+        #  estimator was explaining only about half the disturbance as a result.
+        #
+        #  The prediction is scored BEFORE the update, so fit_gain is an honest
+        #  one-step-ahead number rather than a fit to data already absorbed.
+        if self._have_prev:
+            ahead = self.rls.predict(self._psi_prev)
+            self._update_panel(ahead, y)
+            self.rls.update(self._psi_prev, y)
+        self._psi_prev = psi.clone()
+        self._have_prev = True
 
         self._pred = self.rls.predict(psi)  # (B, N)
         self._conf = confidence(psi, self.rls.P, self.pact_params, self._dim)
@@ -581,6 +611,65 @@ class PactMixin(ExertionMixin):
             corr = corr.clamp(-lim, lim)
         self._corr = corr
 
+    # ------------------------------------------------------------------
+    #  II.10 -- the instrument panel, so a run can be judged without rerunning it
+    # ------------------------------------------------------------------
+
+    def _update_panel(self, ahead: Tensor, y: Tensor, decay: float = 0.99) -> None:
+        """Score the one-step-ahead prediction against an INTERCEPT-ONLY null.
+
+        II.10: raw R^2 is inflated by the per-agent intercept memorising each
+        agent's typical residual, so the number that means "the peer channels
+        explained something" is the improvement over a fit that has only that
+        column.  Maintained as decaying sums because beta* tracks a cyclic driver
+        and a lifetime average would hide the tracking.
+        """
+        d = decay
+        self._ybar = d * self._ybar + (1 - d) * y
+        self._fit_sse = d * self._fit_sse + (1 - d) * (y - ahead) ** 2
+        self._null_sse = d * self._null_sse + (1 - d) * (y - self._ybar) ** 2
+        self._fit_gain = 1.0 - self._fit_sse / self._null_sse.clamp_min(1e-12)
+
+        #  beta against the TRUTH.  This instance is synthetic, so beta* is known
+        #  exactly -- by far the most direct answer to "is the estimator
+        #  identifying, or is the return moving for some other reason".
+        #
+        #  Two things have to be right or this reads as a catastrophic failure
+        #  when nothing is wrong, and both were wrong when it was first written:
+        #
+        #  1. The target must carry the SAME normalisation the environment
+        #     applies.  `_load` is (beta . x) / load_norm * u_range_i, so the
+        #     coefficient the regression recovers is beta*_m * u_range_i /
+        #     load_norm -- per agent, because u_range is per agent.  Comparing
+        #     against bare beta* reported a relative error of ~4000.
+        #  2. It must only be scored where the driver is LIVE.  beta* is
+        #     proportional to A(t), which is EXACTLY zero for half of every cycle,
+        #     so ||target|| -> 0 there and both the cosine and the relative error
+        #     are divisions by nothing.  The quiet half is the placebo, and there
+        #     is no beta to recover in it.
+        beta_true = beta_star(self._A, self.ns)  # (B, r)
+        gain = (self._u_range[:, 0] / self._load_norm).reshape(1, -1, 1)  # (1,N,1)
+        bt = beta_true.unsqueeze(1) * gain  # (B,N,r)
+        tgt = torch.cat(
+            [
+                (bt * self._ref.reshape(1, 1, -1)).sum(-1, keepdim=True),
+                bt * self._scale.reshape(1, 1, -1),
+            ],
+            dim=-1,
+        )[..., : self._dim]
+
+        bh = self.rls.beta
+        tn = tgt.norm(dim=-1)
+        live = tn > 1e-9  # the driver is up
+        num = (bh * tgt).sum(-1)
+        den = bh.norm(dim=-1) * tn
+        cos = torch.where(den > 1e-12, num / den.clamp_min(1e-12), torch.zeros_like(num))
+        err = (bh - tgt).norm(dim=-1) / tn.clamp_min(1e-12)
+        # hold the last live reading through the placebo half rather than
+        # averaging a meaningless number into it
+        self._beta_cos = torch.where(live, cos, self._beta_cos)
+        self._beta_err = torch.where(live, err, self._beta_err)
+
     def _correction(self, index: int) -> Optional[Tensor]:
         if not self.pact_enabled:
             return None
@@ -604,6 +693,15 @@ class PactMixin(ExertionMixin):
                 "pact_residual": (self._load[:, i : i + 1] - one(self._pred)).abs(),
                 "pact_diverged": torch.full_like(
                     one(self._pred), float(self._n_diverged)
+                ),
+                # II.10: does the reduction hold, and is beta being recovered?
+                "pact_fit_gain": one(self._fit_gain),
+                "pact_beta_cos": one(self._beta_cos),
+                "pact_beta_relerr": one(self._beta_err),
+                # what the correction actually did to the disturbance
+                "pact_corr_vs_d": (
+                    self._corr[:, i].norm(dim=-1, keepdim=True)
+                    / self._d[:, i].norm(dim=-1, keepdim=True).clamp_min(1e-9)
                 ),
             }
         )

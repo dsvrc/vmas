@@ -10,6 +10,7 @@
 #  installed copy while hydra reads yaml from here.  That failure reads like a
 #  config error and is an import-path error.
 
+import os
 import sys
 from pathlib import Path
 

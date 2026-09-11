@@ -7,7 +7,7 @@
 #  comparison measures the wrong thing.
 #
 #  Overridable from the environment, applied to every arm at once:
-#      DEVICE=cuda ITERS=60 SEEDS="0 1 2 3 4" bash scripts/ns_main.sh
+#      DEVICE=cuda FRAMES=10000000 SEEDS="0 1 2 3 4" bash scripts/ns_main.sh
 #      HOST=sampling bash scripts/ns_main.sh
 
 set -euo pipefail
@@ -32,9 +32,18 @@ TRAIN_DEVICE="${TRAIN_DEVICE:-$DEVICE}"
 #      balance     NOT MONOTONE under the dial.  See its yaml.  Not a headline.
 HOST="${HOST:-transport}"
 
-ITERS="${ITERS:-40}"
+#  BenchMARL's OWN default budget, not a shortened one.  base_experiment.yaml
+#  ships max_n_frames = 3_000_000; the 1.2M here previously was cut to make a
+#  debug loop fast and should never have been the default.
+#
+#  BATCH and ENVS follow fine_tuned/vmas/conf/config.yaml -- BenchMARL's tuned
+#  reference for VMAS tasks -- so the optimiser settings are the ones these
+#  scenarios were tuned with.  3M / 30000 = 100 collection iterations.
+#
+#  fine_tuned/vmas uses 10M frames for its published numbers.  Set
+#  FRAMES=10000000 for the full reference budget.
+FRAMES="${FRAMES:-3000000}"
 BATCH="${BATCH:-30000}"
-FRAMES="${FRAMES:-$((ITERS * BATCH))}"
 SEEDS="${SEEDS:-0 1 2 3 4}"
 
 #  BenchMARL picks the action space itself, so absolute returns are NOT

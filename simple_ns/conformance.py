@@ -227,7 +227,11 @@ def _centring():
     Q = torch.zeros(pos.shape[0], c.n, c.r, 2)
     for _ in range(4):
         Q, _, _, x = c.step_channels(pos, u, Q)
-    ref, scale = c.geometric_reference(samples=64)
+    #  The reference is the host's own spawn geometry at run time; offline there
+    #  is no host, so the fleet layout stands in for it.  What is being checked
+    #  is that centring CONDITIONS the design matrix, which does not depend on
+    #  which layout is used -- only on using the same one the channels come from.
+    ref, scale = c.geometric_reference(pos, samples=64)
     raw = torch.cat([torch.ones_like(x[..., :1]), x], -1).reshape(-1, 1 + c.r)
     cen = c.design(x, ref, scale).reshape(-1, 1 + c.r)
     k_raw = float(torch.linalg.cond(raw.T @ raw))

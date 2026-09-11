@@ -10,6 +10,10 @@
 from __future__ import annotations
 
 import copy
+import csv
+import os
+import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -131,7 +135,94 @@ class SimpleNsClass(VmasClass):
             info = batch.get(("next", group, "info"))
             out.update(self._ns_diagnostics(info))
             out.update(self._pact_diagnostics(info))
+        # the domain metric belongs in the same row as the diagnostics, or you
+        # cannot tell whether a good return came with a good estimate
+        try:
+            rew = batch.get(("next", "agents", "reward"))
+            out["domain/reward_mean"] = float(rew.to(torch.float32).mean())
+        except Exception:  # noqa: BLE001 -- group naming varies by task
+            pass
+        self._write_debug_row(out)
         return out
+
+    # ------------------------------------------------------------------
+    #  the debug CSV
+    # ------------------------------------------------------------------
+
+    def _write_debug_row(self, row: Dict[str, float]) -> None:
+        """Append one row per collection iteration to a standalone CSV.
+
+        BenchMARL's own csv logger writes one file per scalar, which is fine for
+        plotting a curve and useless for asking "on the iteration where the
+        return moved, what was the estimator doing".  Everything needed to judge
+        whether PACT is working -- and, if it is not, WHICH link failed -- belongs
+        in one row.
+
+        Read it in this order, because the first question that answers "no" is
+        the one to fix:
+
+          ns/live_frac          did the disturbance happen at all?  0 means the
+                                dial never fired and nothing below matters.
+          ns/load_mean          how big was it, in action-range units?
+          pact/fit_gain         does the REDUCTION hold?  Scored against an
+                                intercept-only null, so this is specifically
+                                whether the PEER CHANNELS explained anything.
+                                Near 0 with a live disturbance means the model
+                                class is wrong here and no amount of training
+                                helps (II.9 gate 6).
+          pact/beta_cos         is beta being RECOVERED?  Cosine against the true
+                                beta*, which is known exactly on this instance.
+                                High fit_gain with low beta_cos means it predicts
+                                without identifying -- the design matrix is
+                                degenerate and you may use beta but not decompose
+                                it (II.9 gate 7).
+          pact/n_updates        is the estimator being fed?  Flat means the rows
+                                are being skipped as dead (P-4.2).
+          pact/n_diverged       did the covariance blow up?  Non-zero means mu is
+                                too aggressive for the excitation in this run.
+          pact/confidence       is the gate open?
+          pact/trust_applied    ... and does applied trust track the policy's
+          pact/trust_policy     trust?  Divergence here is the P-5.2 failure.
+          pact/cancelled_frac   how much of the disturbance was actually removed.
+          pact/corr_vs_d        correction magnitude over disturbance magnitude.
+                                Should approach 1.  Much above 1 is over-
+                                correction; near 0 means trust or the estimate is
+                                dead.
+          ns/clipped_frac       is the actuator saturating?  Past ~30% the row is
+                                about the action box, not the method.
+          domain/reward_mean    and only then, did it win.
+
+        The path comes from SIMPLE_NS_DEBUG_CSV, which simple_ns/run.py sets from
+        experiment.save_folder so each arm gets its own file.
+        """
+        path = os.environ.get("SIMPLE_NS_DEBUG_CSV")
+        if not path or not row:
+            return
+        try:
+            f = Path(path)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            self._debug_n = getattr(self, "_debug_n", 0) + 1
+            record = {
+                "iteration": self._debug_n,
+                "wall_time": round(time.time() - getattr(self, "_debug_t0", time.time()), 2),
+                "arm": "pact" if self.pact_enabled else "blind",
+                "sigma": self.config.get("ns_severity"),
+                "direct": self.config.get("ns_direct"),
+                "channels": self.config.get("pact_channels"),
+                "oracle": self.config.get("pact_oracle"),
+                "mu": self.config.get("pact_mu"),
+                **{k.replace("/", "_"): v for k, v in sorted(row.items())},
+            }
+            if not hasattr(self, "_debug_t0"):
+                self._debug_t0 = time.time()
+            new = not f.exists()
+            with f.open("a", newline="") as fh:
+                w = csv.DictWriter(fh, fieldnames=list(record))
+                if new:
+                    w.writeheader()
+                w.writerow(record)
+        except Exception:  # noqa: BLE001 -- diagnostics must never kill a run
+            pass
 
     @staticmethod
     def _groups_with_info(batch: TensorDictBase) -> List[str]:
@@ -206,6 +297,13 @@ class SimpleNsClass(VmasClass):
             ("pact_corr", "correction_mag"),
             ("pact_updates", "n_updates"),
             ("pact_skipped", "n_skipped"),
+            ("pact_diverged", "n_diverged"),
+            # II.10's two headline columns: does the reduction hold, and is beta
+            # actually being recovered (the truth is known on this instance)
+            ("pact_fit_gain", "fit_gain"),
+            ("pact_beta_cos", "beta_cos"),
+            ("pact_beta_relerr", "beta_relerr"),
+            ("pact_corr_vs_d", "corr_vs_d"),
         ):
             v = self._get(info, key)
             if v is not None:

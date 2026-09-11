@@ -159,24 +159,40 @@ class Coupling:
     # ------------------------------------------------------------------
 
     def geometric_reference(
-        self, arena: float = 1.0, samples: int = 256, seed: int = 0
+        self, pos_ref: Tensor, samples: int = 256, seed: int = 0
     ) -> Tuple[Tensor, Tensor]:
-        """``(ref, scale)``, each ``(r,)``.
+        """``(ref, scale)``, each ``(r,)``.  P-3.3's centring reference.
 
-        The channel each agent would see if every peer were placed uniformly at
-        random in the arena and exerted uniformly at random -- a function of the
-        DECLARED structure and the arena only, so no run data enters.  Computed
-        with an explicit CPU generator so it cannot consume the run's RNG stream
-        and cannot differ between arms.
+        The channel each agent would see if every peer exerted uniformly at
+        random from the SCENARIO'S OWN spawn geometry -- a function of declared
+        structure only, so no run data enters.
+
+        ``pos_ref`` has to be the host's own layout for the same reason
+        ``load_norm`` does, and getting it wrong here is worse because it is
+        silent.  With a uniform-over-arena draw the reference mean for channel 1
+        came out at 0.011 with a scale of 0.020, while the actual runtime channel
+        sat at 0.251 -- so the centred regressor was **psi = 11.8** instead of
+        O(1).  The design matrix is then badly conditioned, the intercept and the
+        class channels trade off, and beta comes out uncorrelated with the truth
+        (measured cosine -0.29) while fit_gain still reads 0.86.  That is exactly
+        P-3.3's warning -- "the split becomes unidentifiable even though
+        prediction is fine" -- and it is why beta must be scored against the
+        truth and not inferred from the fit.
+
+        Computed with an explicit CPU generator so it cannot consume the run's
+        RNG stream and cannot differ between arms.
         """
         gen = torch.Generator().manual_seed(seed)
-        Q = torch.zeros(samples, self.n, self.r, 2)
+        cpu = Coupling(self.n, self.p, device=None)
+        pos_ref = pos_ref.detach().to("cpu", torch.float32)
         vals = []
         for k in range(samples):
-            pos = (torch.rand(1, self.n, 2, generator=gen) * 2 - 1) * arena
-            u = torch.rand(1, self.n, 2, generator=gen) * 2 - 1
-            cpu = Coupling(self.n, self.p, device=None)
-            _, _, _, x = cpu.step_channels(pos, u, torch.zeros(1, self.n, self.r, 2))
+            pos = pos_ref[k % pos_ref.shape[0]].unsqueeze(0)
+            ang = torch.rand(1, self.n, generator=gen) * 2 * math.pi
+            u = torch.stack([ang.cos(), ang.sin()], dim=-1)
+            Q = torch.zeros(1, self.n, self.r, 2)
+            for _ in range(3):  # let the filtered channel reach steady state
+                Q, _, _, x = cpu.step_channels(pos, u, Q)
             vals.append(x.reshape(-1, self.r))
         V = torch.cat(vals, dim=0)
         ref = V.mean(dim=0)
