@@ -20,6 +20,7 @@ tasks = [
     VmasTask,
     VmasNsTask,
     RoadNsTask,
+    SimpleNsTask,
     Smacv2Task,
     PettingZooTask,
     MeltingPotTask,

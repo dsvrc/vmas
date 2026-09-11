@@ -34,7 +34,15 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import torch
 from torch import Tensor
 
-__all__ = ["PactParams", "Basis", "RLS", "trust_from_logit", "confidence", "steer"]
+__all__ = [
+    "PactParams",
+    "Basis",
+    "RLS",
+    "trust_from_logit",
+    "confidence",
+    "steer",
+    "compensate",
+]
 
 
 @dataclass(frozen=True)
@@ -455,6 +463,38 @@ def steer(v_command: Tensor, predicted: Tensor, g: Tensor, p: PactParams) -> Ten
         # property is preserved bit for bit.  See PactParams.shift_clip.
         shift = shift.clamp(1.0 - p.shift_clip, 1.0 + p.shift_clip)
     return v_command * shift
+
+
+def compensate(
+    u_command: Tensor, direction: Tensor, predicted: Tensor, g: Tensor
+) -> Tensor:
+    """II.6's FIRST row: the exact channel inverse.  ``(B, N, D) -> (B, N, D)``.
+
+        u_sent = u_command - g * direction * predicted
+
+    Use this where the disturbance is ADDITIVE in the agent's own action space,
+    so a correct estimate cancels it rather than merely routing around it.  The
+    method may then claim identification AND compensation; where no inverse
+    exists, use ``steer`` instead and claim identification and steering only.
+    Conflating the two is the one thing II.6 says is not publishable.
+
+    ``direction`` is the unit vector the disturbance arrives along.  It is PUBLIC
+    -- computed from the declared operator and the peers' broadcast actions --
+    which is precisely what lets a scalar estimate cancel a vector disturbance.
+    ``predicted`` is the scalar magnitude the estimator supplies.
+
+    P-7.1, the floor property: at ``g = 0`` this returns ``u_command`` bit for
+    bit for any ``predicted``, however wrong, because the correction term is
+    multiplied by exactly zero rather than merely by something small.  The
+    estimator therefore sits entirely outside the worst-case decision path: a
+    diverging estimate can fail to help, and cannot drag the arm below the
+    baseline it wraps.
+
+    No clamp here on purpose.  The host clips to its own action range and
+    reports the clipped fraction; a clamp inside the method would hide the
+    saturation that bounds sigma*.
+    """
+    return u_command - (g.unsqueeze(-1) * predicted.unsqueeze(-1)) * direction
 
 
 def herd_index(route_of: Sequence[int], n_routes: int) -> float:

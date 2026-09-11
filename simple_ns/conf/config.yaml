@@ -1,0 +1,15 @@
+defaults:
+  - experiment: base_experiment
+  - algorithm: ???
+  - task: ???
+  - model: layers/mlp
+  - model@critic_model: layers/mlp
+  - _self_
+
+hydra:
+  searchpath:
+    # Resolved through the *imported* benchmarl package, so this and the
+    # ConfigStore schemas always come from the same copy of BenchMARL.
+    - pkg://benchmarl/conf
+
+seed: 0

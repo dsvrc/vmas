@@ -1,0 +1,119 @@
+defaults:
+  - simple_ns_sampling_config
+  - _self_
+
+# Stock vmas/sampling, unchanged.
+max_steps: 100
+n_agents: 3
+shared_rew: False
+n_gaussians: 3
+lidar_range: 0.2
+cov: 0.05
+collisions: True
+spawn_same_pos: False
+
+# ---------------------------------------------------------------------------
+# The exertion dial.  TASK physics: this block reaches EVERY arm (NS-3.1).
+#
+# Cell (C, invertible): the disturbance is an additive force in the agent's own
+# action space, reaching it ONLY through its neighbours.  A lone agent feels
+# nothing at any severity; a correct estimate cancels it exactly.
+# ---------------------------------------------------------------------------
+ns_severity: 1.0             # sigma. 0 makes the disturbance EXACTLY zero at
+                             # every driver value, so the stock scenario is
+                             # recovered bit for bit and this is how B0 is run.
+ns_period: 100               # steps per driver cycle
+ns_wet_fraction: 0.5         # the remaining half is EXACTLY quiet -- that is
+                             # what makes NS-2.5's placebo provable rather than
+                             # merely small
+ns_loss_at_sigma1: 0.14      # STATED CALIBRATION TARGET, not a published
+                             # constant: at the driver peak, with every peer at
+                             # full exertion, the disturbance is 0.14 of the
+                             # receiver's own action range. Normalised against
+                             # the host's OWN spawn geometry, so sigma means the
+                             # same physical severity in every host. road_ns's
+                             # sigma=1 IS anchored (HCM, 14% capacity); this one
+                             # is not, and the paper must say so.
+ns_rho: 0.9                  # transmission memory. Applied to the PUBLIC
+                             # channels, so the model stays exactly linear in
+                             # what the agent can compute.
+ns_n_types: 3                # r. Independent of the number of agents (P-1.1):
+                             # adding agents adds no parameters.
+ns_recv_spread: 0.6          # receiver compliance spread -- PUBLIC, and what
+                             # makes the operator asymmetric
+ns_send_spread: 0.8          # sender gain spread -- this is beta*, and it is
+                             # NOT handed to the agent
+ns_kernel_lambda: 0.35       # transmission length scale, world units
+ns_y_clip: 10.0              # P-2.1's declared bound on the sensor
+ns_observe_residual: true    # II.2: the agent observes its OWN residual, ONE
+                             # STEP STALE. Proprioception, not privilege.
+ns_direct: false             # THE (B) CONTROL. true moves this instance from
+                             # cell (C) to cell (B): same driver, same severity,
+                             # same reward, but the disturbance no longer passes
+                             # through the neighbours and a LONE agent feels it.
+                             # Run it against the default to show that what the
+                             # peer channels buy is the whole multi-agent part.
+
+# ---------------------------------------------------------------------------
+# PACT-1. Read by the method layer only; the dial never sees these keys.
+# ---------------------------------------------------------------------------
+pact_enabled: false          # the arm switch
+pact_trust: 0.9              # P-5.1's INVERTED prior: near full reliance, not
+                             # half
+pact_mu: 0.97                # the tracking dial (P-4.3): declared, SWEPT, and
+                             # not inherited.  URB's 0.999 has an effective
+                             # memory of 1/(1-mu) = 1000 steps, but this driver
+                             # cycles every 100, so at 0.999 the estimator
+                             # averages the drift away instead of tracking it.
+                             #
+                             # Swept on transport at sigma=2, correction bounded.
+                             # Blind is 50.3% of B0.  TWO excitation regimes,
+                             # because they disagree and only one of them is
+                             # what early training looks like:
+                             #
+                             #   mu     mem   %B0   err(heuristic)  err(random)
+                             #  0.999  1000  74.7%     0.640          0.0282
+                             #  0.99    100  76.9%     0.611          0.0267
+                             #  0.98     50  79.6%     0.592          0.0248
+                             #  0.97     33  80.9%     0.576          0.0231  <-
+                             #  0.95     20  82.2%     0.517          DIVERGED
+                             #  0.90     10  81.2%     9.5e33         DIVERGED
+                             #
+                             # 0.95 scores best under the heuristic and BLOWS UP
+                             # under a random action stream, where the channels
+                             # are small and the covariance inflates.  Early RL
+                             # training is near-random, so 0.95 would have died
+                             # in the first iterations of every run.  0.97 is the
+                             # best value stable in BOTH regimes.
+                             #
+                             # SELECTED ON PREDICTION ERROR, never on return: at
+                             # mu=0.9 the estimate is meaningless (1e33) and the
+                             # return still looks fine, because a bounded but
+                             # arbitrary correction is a perturbation this
+                             # heuristic tolerates.  See pact_corr_clip.
+                             #
+                             # The proper fix for the instability is a covariance
+                             # bound in the RLS, which is not implemented -- so
+                             # mu is a stability constraint here, not only a
+                             # bias/variance choice.  Say so in the ablation.
+pact_p0: 10.0
+pact_warmup: 200             # steps before any reliance is applied
+pact_channels: full          # "intercept" deletes ONLY the peer channels and
+                             # keeps everything else, leaving a per-agent
+                             # adaptive bias. On (B) it should lose nothing; on
+                             # (C) it should lose most of the recovery. That
+                             # pair is what the classification rests on.
+pact_corr_clip: 0.5          # guard rail, declared: |correction| <= 0.5 of the
+                             # agent's own action range.  NOT a tuning knob.
+                             # Without it a DIVERGED estimator (prediction error
+                             # 1e34 at mu=0.9) was clamped by the action box into
+                             # a large saturating kick that SCORED BETTER than a
+                             # correct estimate -- 96.2% of B0 against 84.7%.
+                             # Selecting mu on return would then have selected
+                             # the diverged estimator.  mu is selected on
+                             # PREDICTION ERROR; this bound is what makes that
+                             # safe.  Symmetric about 0, so P-7.1 stays exact.
+pact_oracle: false           # true replaces the estimate with the TRUE
+                             # disturbance: the free-answer controller, i.e. the
+                             # CEILING. Where it fails, sigma is past sigma* and
+                             # the row is about the environment, not the method.
