@@ -62,6 +62,18 @@ def hydra_experiment(cfg: DictConfig) -> None:
     print(f"benchmarl: {Path(benchmarl.__file__).resolve().parent}")
     print("\nLoaded config:\n")
     print(OmegaConf.to_yaml(cfg))
+
+    #  One debug row per collection iteration, written next to the run it
+    #  describes.  `log_info` on the task cannot see the experiment folder, so
+    #  the path is passed through the environment -- see
+    #  SimpleNsClass._write_debug_row for what is in it and the order to read it.
+    #
+    #  setdefault, not assignment: an explicitly exported SIMPLE_NS_DEBUG_CSV
+    #  wins, which is what lets a run launched some other way still get one.
+    folder = Path(str(cfg.experiment.save_folder or "."))
+    os.environ.setdefault("SIMPLE_NS_DEBUG_CSV", str(folder / "pact_debug.csv"))
+    print(f"pact debug csv: {os.environ['SIMPLE_NS_DEBUG_CSV']}\n", flush=True)
+
     load_experiment_from_hydra(cfg, task_name=choices.task).run()
 
 
