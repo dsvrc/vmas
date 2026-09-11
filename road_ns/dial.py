@@ -199,6 +199,7 @@ def loading_by_route(
     structure: RoadStructure,
     route_mask: Tensor,
     route_of: Tensor,
+    self_element: Optional[Tensor] = None,
 ) -> Tuple[Tensor, Tensor]:
     """``u_i`` for a BATCH of worlds, each with its own route assignment.
 
@@ -207,18 +208,60 @@ def loading_by_route(
     independently per parallel environment, so applying one world's routes to
     all of them computes the loading of a fleet that does not exist.
 
+    ``self_element`` is the I.2 fix and it is not optional in spirit.  Pass the
+    element each agent is itself occupying, ``(B, N)``, and that agent's own
+    unit is removed from the load before the ratio is taken, so ``u_i`` is
+    **peer** loading:
+
+        u_i = max over a in E(i) of (load_a - 1[i is on a]) / (capacity_a * g_a)
+
+    Two things follow, and both are requirements rather than niceties:
+
+    * I.2's practical test passes exactly -- "an agent alone in the environment
+      must read a harm of exactly 1.0 in the worst storm you can dial".  With
+      the agent's own vehicle left in the load it reads 1.034 at sigma=1 and
+      1.139 at sigma=3 on this map: it slows *itself* down, which is a level
+      shift and not a coupling.
+    * The PACT sensor and the PACT basis then describe the same quantity.
+      ``Basis.channels`` is strictly a sum over ``j != i`` (P-3.1), so a target
+      that still contains a self term asks the estimator to explain something
+      its regressor structurally cannot reach -- pure bias, and it lands in the
+      intercept.
+
+    This is NOT the same question the I.5 ceiling asks.  There the excess is
+    attributed across the whole system -- "who put this load on the medium" --
+    and an agent did put its own unit there, which is what ``Delta_own`` counts.
+    Here the question is "how much does the medium slow ME down", and your own
+    vehicle does not slow you down.  Both are right; they are different sums.
+
     Args:
         element_load: ``(B, A)``
         g:            ``(B, A)``
         route_mask:   ``(P, A)`` bool, from ``RoadStructure.route_mask``
         route_of:     ``(B, N)`` long, each agent's route index
+        self_element: ``(B, N)`` long, the element each agent occupies, or None
+                      to keep the agent's own unit in the load (the pre-fix
+                      behaviour, kept only so the ablation can reproduce it).
 
     Returns:
         ``(u, binding)``, each ``(B, N)``.
     """
-    ratio = element_load / (structure.capacity.reshape(1, -1) * g).clamp_min(1e-12)
+    denom = (structure.capacity.reshape(1, -1) * g).clamp_min(1e-12)
+    ratio = element_load / denom
     mask = route_mask.to(ratio.device)[route_of]  # (B, N, A)
     masked = ratio.unsqueeze(1).masked_fill(~mask, float("-inf"))
+
+    if self_element is not None:
+        # Subtract the agent's own unit at the one element it occupies.  Done by
+        # scatter rather than by materialising a (B, N, A) one-hot: at B=600,
+        # N=40, A=104 the one-hot alone is 10 MB of zeros per step.
+        own = 1.0 / torch.gather(denom.expand(ratio.shape[0], -1), 1, self_element)
+        masked = masked.scatter_add(2, self_element.unsqueeze(-1), -own.unsqueeze(-1))
+        # An agent standing on an element that is not on its own route would
+        # otherwise push that entry negative; it is masked to -inf already, and
+        # -inf + finite is still -inf, so nothing leaks.
+        masked = masked.clamp_min(0.0).masked_fill(~mask, float("-inf"))
+
     u, binding = masked.max(dim=-1)
     # an agent with an empty route reads exactly zero rather than -inf
     empty = ~mask.any(dim=-1)

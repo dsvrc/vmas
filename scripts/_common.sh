@@ -8,12 +8,23 @@
 #  comparison measures the wrong thing.
 #
 #  Overridable from the environment, applied to every arm at once:
-#      DEVICE=cuda FRAMES=3000000 SEEDS="0 1 2 3 4" bash scripts/cfg_main.sh
+#      DEVICE=cuda ITERS=40 SEEDS="0 1 2 3 4" bash scripts/cfg_main.sh
+#      TASK=road_ns/road_traffic ENVS=32 ITERS=4 bash scripts/cfg_provenance.sh
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 DEVICE="${DEVICE:-cuda}"
+
+#  WHICH HOST.  Both carry the identical medium -- same map, same capacities,
+#  same operator, same dial, same PACT -- and differ only in the vehicle model.
+#
+#      road_ns/lanelet_flow   the sweep host.   0.24 ms/frame at N=16/600 envs
+#      road_ns/road_traffic   SigmaRL's own.  173    ms/frame at N=40/16  envs
+#
+#  Measured, CPU, via vmas.make_env.  1.2M frames is 5 minutes against 58 HOURS.
+#  road_traffic is kept for the provenance row, run at low N (cfg_provenance.sh).
+TASK="${TASK:-road_ns/lanelet_flow}"
 
 #  Budget is set in ITERATIONS, because that is what you watch tick by.
 #
@@ -37,24 +48,22 @@ SEEDS="${SEEDS:-0 1 2 3 4}"
 #  against pact WITHIN an algorithm, which is the comparison that carries the
 #  claim anyway.
 ALGOS="${ALGOS:-ippo mappo iddpg maddpg isac masac iql qmix vdn}"
-#  road_traffic's per-step cost is dominated by PYTHON LOOPS OVER AGENTS
-#  (interX collision checks in reward(), and the observation builder), each
-#  launching small tensor ops over the batch.  So the cost is roughly flat in
-#  batch width and linear in the number of sequential steps -- which means more
-#  parallel envs is nearly free and is the single biggest lever here.
+
+#  For lanelet_flow the per-step work is vectorised over the batch, so the cost
+#  per FRAME falls as the batch widens and more parallel envs is close to free.
 #
-#  BATCH/ENVS is the number of sequential steps per iteration: 60000/600 = 100,
-#  against 1000 at ENVS=60.  Same frames, a tenth of the Python-loop
-#  iterations.  600 is also what fine_tuned/vmas/conf/config.yaml uses.
+#  That was NOT true of road_traffic, and the comment here used to claim it was.
+#  Its dominant cost is a python reset loop over (env, agent) pairs, which
+#  scales linearly with envs and therefore does not amortise at all -- measured
+#  30 ms/frame at 64 envs against 56 at 16, a 1.9x gain for 4x the envs.
+#  If you set TASK=road_ns/road_traffic, drop ENVS as well.
 ENVS="${ENVS:-600}"
 LOGGERS="${LOGGERS:-[csv]}"
 EXTRA="${EXTRA:-}"
 OUT_ROOT="${OUT_ROOT:-runs/road_ns}"
 
-# road_traffic is heavy per step, so the on-policy batch is sized for a
-# vectorised sim rather than left at BenchMARL's 10-env default.
 COMMON=(
-  "task=road_ns/road_traffic"
+  "task=${TASK}"
   "experiment.render=false"
   "experiment.checkpoint_at_end=true"
   "experiment.max_n_frames=${FRAMES}"
@@ -76,7 +85,11 @@ COMMON=(
 run_one () {
   local cfg="$1" seed="$2" algo="$3" arm="$4"; shift 4
   local dir="${OUT_ROOT}/${cfg}/s${seed}/${algo}_${arm}"
-  if [ -d "${dir}/checkpoints" ]; then
+  # BenchMARL nests a TIMESTAMPED run folder under save_folder, so the finished
+  # marker is `<dir>/*/checkpoints`, never `<dir>/checkpoints`.  Checking the
+  # latter meant the skip never fired and every re-run started from scratch and
+  # left another folder behind.
+  if compgen -G "${dir}/*/checkpoints" > /dev/null; then
     echo "== skip ${cfg} s${seed} ${algo} ${arm} (already has checkpoints)"
     return 0
   fi

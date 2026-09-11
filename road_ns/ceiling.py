@@ -64,6 +64,17 @@ def element_load(
     fit) reported ``u_mean = 1.77``, i.e. a medium impossibly far over capacity,
     because the load was a flow and the denominator was an occupancy.  Load and
     capacity must be the same kind of quantity.
+
+    **This is a time average, and the runtime loading is a realisation.**  At
+    run time a vehicle is on exactly ONE element, so the load is an integer
+    occupancy and ``u_i`` is the max over the route of that integer; here it is
+    the expected occupancy.  Because the sensor takes a MAX (NS-1.1), the
+    instantaneous value sits systematically above the average one -- measured
+    ``u_mean`` 0.170 here against 0.395 in simulation at the same 16-of-40
+    fleet.  Neither is wrong and they must not be reconciled by changing one:
+    the decomposition is an expectation over the schedule, which is what makes
+    it computable with no policy and no simulator, and that is the whole point
+    of computing it first (NS-4.1).  Quote them as what they are.
     """
     load = torch.zeros(1, structure.n_elements)
     for r in route_of:

@@ -31,8 +31,32 @@ class InertLayerError(RuntimeError):
     """
 
 
+#: task name -> which host carries the medium.  See road_ns/scenario.py.
+HOST_OF_TASK = {
+    "road_traffic": "road_traffic",   # SigmaRL's scenario: faithful, expensive
+    "lanelet_flow": "lanelet_flow",   # same map/medium, vectorised vehicle model
+}
+
+
 class RoadNsClass(VmasClass):
-    """``vmas/road_traffic`` + the dial (+ PACT), as a BenchMARL task."""
+    """The CPM lanelet medium + the dial (+ PACT), as a BenchMARL task.
+
+    Two hosts carry the identical medium (``road_ns.scenario.HOSTS``):
+    ``road_ns/road_traffic`` for provenance and ``road_ns/lanelet_flow`` for the
+    sweep.  The dial, the harm channel and PACT are the same objects in both, so
+    a difference between them is a difference in the vehicle model and nothing
+    else.
+    """
+
+    @property
+    def host(self) -> str:
+        name = self.name.lower()
+        if name not in HOST_OF_TASK:
+            raise ValueError(
+                f"no host registered for road_ns task {name!r}; "
+                f"known: {sorted(HOST_OF_TASK)}"
+            )
+        return HOST_OF_TASK[name]
 
     def _scenario_kwargs(self) -> Dict[str, Any]:
         config = copy.deepcopy(self.config)
@@ -60,10 +84,11 @@ class RoadNsClass(VmasClass):
 
         config = self._scenario_kwargs()
         pact = self.pact_enabled
+        host = self.host
         return lambda: VmasEnv(
             # a scenario INSTANCE: nothing is copied into the installed vmas, so
             # a vmas upgrade cannot silently revert the non-stationarity
-            scenario=make_scenario(pact),
+            scenario=make_scenario(pact, host=host),
             num_envs=num_envs,
             continuous_actions=continuous_actions,
             seed=seed,
@@ -195,9 +220,10 @@ class RoadNsClass(VmasClass):
 
 
 class RoadNsTask(Task):
-    """Enum for road_traffic under the drift layer."""
+    """Enum for the CPM lanelet medium under the drift layer."""
 
     ROAD_TRAFFIC = None
+    LANELET_FLOW = None
 
     @staticmethod
     def associated_class():

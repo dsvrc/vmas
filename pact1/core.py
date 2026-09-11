@@ -65,6 +65,62 @@ class PactParams:
     constant rather than a per-instance scale factor -- and a tuned kappa is a
     tuned result."""
 
+    shift_mode: str = "centred"
+    """How the predicted excess is turned into a pace shift.  ``centred`` or
+    ``zscore``.
+
+    ``zscore`` is URB's literal form -- ``z = zscore(predicted)`` -- and it is
+    kept only so the ablation can run it.  It is WRONG for this channel, and
+    measurably so.  In URB the shift is subtracted from a LOGIT, where the only
+    thing that matters is the ranking and a standardised score is exactly
+    right.  Here it multiplies a physical velocity command, and standardising
+    throws away the one thing that channel needs to know: how big the
+    disturbance actually is.  Feeding predictions that differ by 1e-6 still
+    produces ``|z| ~ 1``, so at kappa=1, trust=0.9 the measured result is 14% of
+    agent-steps commanded to REVERSE and 30% with pace cut by more than half --
+    against a real harm of 7-9% at the storm peak.  A compensator an order of
+    magnitude larger than the thing it compensates for, and the same size at
+    sigma=0.01 as at sigma=3.
+
+    ``centred`` subtracts the fleet mean and stops:
+
+        shift_i = 1 - g * kappa * (pred_i - mean_j pred_j)
+
+    P-6.1 asked for a DIMENSIONLESS shift, and it already is: P-2.1 defines the
+    sensor as a RELATIVE excess, ``realized/nominal - 1``, precisely so that
+    path-length scaling is out of it.  The z-score is a second normalisation on
+    a quantity that was already normalised, and the scale it destroys is the
+    signal.  Centring keeps kappa a single declared constant, keeps the channel
+    purely differential (a uniform prediction still moves nobody), and makes the
+    applied compensation scale with the severity -- which is what any
+    compensator is supposed to do."""
+
+    shift_clip: float = 0.5
+    """Safety bound on the pace channel: the shift is clamped to
+    ``[1 - shift_clip, 1 + shift_clip]``.
+
+    This bound is an ADAPTATION forced by II.6's second row, and it must be
+    declared as one.  In URB the shift ``g * kappa * z`` is subtracted from a
+    LOGIT, where a one-sigma prediction is a mild re-ranking.  Here it
+    multiplies a physical velocity command, and because ``z`` is standardised
+    ACROSS THE FLEET its size does not depend on how large the disturbance
+    actually is -- feeding predictions that differ by 1e-6 still yields
+    ``|z| ~ 1``.  Unclamped at kappa=1, trust=0.9 that is measured as 14% of
+    agent-steps commanded to REVERSE and 30% with pace cut by more than half,
+    against a real harm of 7-9% at the storm peak: a compensator an order of
+    magnitude larger than the thing it compensates for.
+
+    Under ``shift_mode="centred"`` this almost never binds -- the fleet spread
+    in predicted relative excess is a few percent -- so it is a guard rail, not
+    a tuning knob.  It exists because nothing else stops a diverging estimate
+    from commanding a negative velocity, and P-7.1 only promises safety at
+    ``g = 0``.
+
+    The clamp is symmetric about 1, so P-7.1 is untouched: at ``g = 0`` the
+    shift is exactly 1 and ``clip(1) == 1`` bit for bit.
+
+    Set to 0.0 to disable it."""
+
     # -- pruning (P-3.4) ----------------------------------------------------
     min_share: float = 1e-3
     min_variance: float = 1e-8
@@ -120,11 +176,16 @@ class Basis:
         """
         if self._shared is None:
             n_routes, n_elem = len(self.routes), self.capacity.shape[0]
-            inc = torch.zeros(n_routes, n_elem)
+            dev = self.capacity.device
+            # On the capacity's device, not the default one: `capacity` arrives
+            # already moved to the training device, and a CPU `inc` divided by a
+            # CUDA `capacity` is a hard device-mismatch error at startup -- which
+            # is why the PACT arm could never have run under DEVICE=cuda.
+            inc = torch.zeros(n_routes, n_elem, device=dev)
             for p_i, r in enumerate(self.routes):
-                inc[p_i, torch.as_tensor(r, dtype=torch.long)] = 1.0
+                inc[p_i, torch.as_tensor(r, dtype=torch.long, device=dev)] = 1.0
             contrib = inc / self.capacity.unsqueeze(0)  # (P, A)
-            S = torch.empty(self.n_classes, n_routes, n_routes)
+            S = torch.empty(self.n_classes, n_routes, n_routes, device=dev)
             for m in range(self.n_classes):
                 mask = (self.element_class == m).to(torch.float32)
                 S[m] = (inc * mask) @ contrib.transpose(0, 1)
@@ -206,19 +267,29 @@ class Basis:
         an intercept column of 1, and the split becomes unidentifiable even
         though prediction stays fine (measured condition number 1.3e5).
         """
+        # The generator is deliberately CPU and explicit: the reference is
+        # structure, so it must not depend on the device or consume the global
+        # RNG stream (which would make the pact arm draw different actions from
+        # the blind arm and silently break the paired comparison).
         gen = torch.Generator().manual_seed(seed)
-        acc = torch.zeros(self.n_classes)
+        dev = self.capacity.device
+        acc = torch.zeros(self.n_classes, device=dev)
         for _ in range(samples):
-            assign = torch.randint(0, len(self.routes), (n_agents,), generator=gen)
-            acc += self.channels(assign.tolist()).mean(dim=0)
+            assign = torch.randint(
+                0, len(self.routes), (n_agents,), generator=gen
+            ).to(dev)
+            acc += self.channels(assign).mean(dim=0)
         return acc / samples
 
     def scale_reference(self, n_agents: int, samples: int = 512, seed: int = 0) -> Tensor:
         gen = torch.Generator().manual_seed(seed + 1)
+        dev = self.capacity.device
         vals = []
         for _ in range(samples // 8):
-            assign = torch.randint(0, len(self.routes), (n_agents,), generator=gen)
-            vals.append(self.channels(assign.tolist()))
+            assign = torch.randint(
+                0, len(self.routes), (n_agents,), generator=gen
+            ).to(dev)
+            vals.append(self.channels(assign))
         v = torch.cat(vals, dim=0)
         return v.std(dim=0, unbiased=False).clamp_min(1e-8)
 
@@ -261,17 +332,27 @@ class RLS:
     only peers' executed actions, which a connected fleet broadcasts anyway.
     """
 
-    def __init__(self, n_agents: int, dim: int, p: PactParams, batch: int = 1) -> None:
+    def __init__(
+        self, n_agents: int, dim: int, p: PactParams, batch: int = 1, device=None
+    ) -> None:
         self.p = p
         self.dim = dim
         self.batch = int(batch)
+        self.device = device
         # (B, N, ...) -- each parallel world is an INDEPENDENT deployment running
         # its own estimator.  Sharing one across worlds would average couplings
         # that no single world has.
-        self.beta = torch.zeros(self.batch, n_agents, dim)
-        self.P = p.p0 * torch.eye(dim).expand(self.batch, n_agents, dim, dim).clone()
-        self.n_updates = torch.zeros(self.batch, n_agents)
-        self.n_skipped = torch.zeros(self.batch, n_agents)
+        #
+        # `device` is not optional in practice: psi arrives on the training
+        # device, and beta/P left on the CPU is a device mismatch on the first
+        # update.
+        f = dict(device=device)
+        self.beta = torch.zeros(self.batch, n_agents, dim, **f)
+        self.P = (
+            p.p0 * torch.eye(dim, **f).expand(self.batch, n_agents, dim, dim).clone()
+        )
+        self.n_updates = torch.zeros(self.batch, n_agents, **f)
+        self.n_skipped = torch.zeros(self.batch, n_agents, **f)
 
     def predict(self, psi: Tensor) -> Tensor:
         """``beta' psi``.  ``psi`` is ``(N, d)`` or ``(B, N, d)``."""
@@ -346,26 +427,34 @@ def confidence(psi: Tensor, P: Tensor, p: PactParams, r: int) -> Tensor:
 def steer(v_command: Tensor, predicted: Tensor, g: Tensor, p: PactParams) -> Tensor:
     """Differential pace shift.  ``(N,) -> (N,)``.
 
-    ``predicted`` is each agent's predicted relative excess. It is z-scored
-    ACROSS THE FLEET so the shift is dimensionless (P-6.1) and so a uniform
-    prediction moves nobody -- only the differential helps, which is the commons
-    in miniature.
+    ``predicted`` is each agent's predicted relative excess -- already
+    dimensionless by P-2.1.  It is CENTRED on the fleet mean, so a uniform
+    prediction moves nobody: only the differential helps, which is the commons
+    in miniature.  See ``PactParams.shift_mode`` for why centring rather than
+    z-scoring, and what z-scoring measurably costs here.
 
     P-7.1, the floor property: at ``g = 0`` this returns ``v_command`` bit for
     bit for any ``predicted``, however wrong; and when every prediction is
     identical the shift is defined to be exactly zero rather than NaN. The
     estimator therefore sits entirely outside the worst-case decision path.
     """
-    # z-score ACROSS THE FLEET, within each world: the last axis is the fleet.
-    # Pooling worlds would make one world's congestion steer another's vehicles.
+    # ACROSS THE FLEET, within each world: the last axis is the fleet.  Pooling
+    # worlds would make one world's congestion steer another's vehicles.
     mean = predicted.mean(dim=-1, keepdim=True)
-    std = predicted.std(dim=-1, unbiased=False, keepdim=True)
-    z = torch.where(
-        std > 1e-12,
-        (predicted - mean) / std.clamp_min(1e-12),
-        torch.zeros_like(predicted),
-    )
-    return v_command * (1.0 - g * p.kappa * z)
+    dev = predicted - mean
+    if p.shift_mode == "zscore":
+        std = predicted.std(dim=-1, unbiased=False, keepdim=True)
+        dev = torch.where(
+            std > 1e-12, dev / std.clamp_min(1e-12), torch.zeros_like(predicted)
+        )
+    elif p.shift_mode != "centred":
+        raise ValueError(f"unknown shift_mode {p.shift_mode!r}")
+    shift = 1.0 - g * p.kappa * dev
+    if p.shift_clip > 0.0:
+        # Symmetric about 1, so g = 0 still gives exactly 1.0 and the floor
+        # property is preserved bit for bit.  See PactParams.shift_clip.
+        shift = shift.clamp(1.0 - p.shift_clip, 1.0 + p.shift_clip)
+    return v_command * shift
 
 
 def herd_index(route_of: Sequence[int], n_routes: int) -> float:

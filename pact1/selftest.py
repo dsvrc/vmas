@@ -99,12 +99,81 @@ def _batched():
     r = RLS(N, bx.shape[-1], P, batch=4)
     r.update(bx, torch.randn(4, N))
     assert r.beta.shape == (4, N, bx.shape[-1])
-    sh = steer(torch.ones(4, N), r.predict(bx), torch.full((4, N), 0.9), P)
+    # The differential property is a property of the CHANNEL, so it is checked
+    # with the safety clamp off.  Clipping is deliberately not mean-preserving
+    # in the tail -- see test_shift_clip_bounds_the_command.
+    unclamped = PactParams(shift_clip=0.0)
+    sh = steer(torch.ones(4, N), r.predict(bx), torch.full((4, N), 0.9), unclamped)
     means = sh.mean(-1)
     assert torch.allclose(means, torch.ones(4), atol=1e-5), (
         f"a uniform pace shift must net to zero within each world, got {means}"
     )
     return "4 worlds: batched == per-world, estimators independent, shift nets to 1.0 in each"
+
+
+@check("test_shift_scales_with_the_disturbance")
+def _shift_scales():
+    """The whole point of ``shift_mode='centred'``.
+
+    A compensator must be as large as the thing it compensates for.  Under the
+    z-score the applied shift is IDENTICAL whether the fleet's predicted
+    excesses differ by 1e-6 or by 1.0, because standardising divides the scale
+    out -- which is why the unclamped z-score channel was measured commanding
+    reversals against a 7-9% harm."""
+    torch.manual_seed(0)
+    base = torch.randn(2000, N)
+    g = torch.full((2000, N), 0.9)
+    out = {}
+    for mode in ("centred", "zscore"):
+        q = PactParams(shift_mode=mode, shift_clip=0.0)
+        out[mode] = [
+            float((steer(torch.ones(2000, N), base * scale, g, q) - 1.0).abs().mean())
+            for scale in (1e-6, 1e-2, 1.0)
+        ]
+    c, z = out["centred"], out["zscore"]
+    assert c[0] < c[1] < c[2], f"centred shift did not track the disturbance: {c}"
+    assert c[2] / max(c[0], 1e-30) > 1e5, f"centred shift barely tracked: {c}"
+    assert max(z) / min(z) < 1.01, f"zscore shift was supposed to be scale-free: {z}"
+    return (
+        f"spread x1e-6 / x1e-2 / x1: centred applies "
+        f"{c[0]:.2e} / {c[1]:.2e} / {c[2]:.2e} -- zscore applies "
+        f"{z[0]:.3f} / {z[1]:.3f} / {z[2]:.3f} REGARDLESS"
+    )
+
+
+@check("test_shift_clip_bounds_the_command")
+def _shift_clip():
+    """The guard rail: no estimate, however wrong, may reverse a vehicle."""
+    torch.manual_seed(0)
+    wild = torch.randn(4000, N) * 1e3          # a diverged estimator
+    g = torch.full((4000, N), 0.9)
+    sh = steer(torch.ones(4000, N), wild, g, P)
+    assert float(sh.min()) >= 1.0 - P.shift_clip - 1e-6, float(sh.min())
+    assert float(sh.max()) <= 1.0 + P.shift_clip + 1e-6, float(sh.max())
+    assert float(sh.min()) > 0.0, "a bounded shift must never reverse the command"
+    # and at a realistic spread it must not bind at all
+    calm = torch.randn(4000, N) * 0.05
+    sh2 = steer(torch.ones(4000, N), calm, g, P)
+    binds = float(((sh2 <= 1.0 - P.shift_clip + 1e-9) | (sh2 >= 1.0 + P.shift_clip - 1e-9)).float().mean())
+    assert binds == 0.0, f"the guard rail bound {binds:.2%} of a realistic fleet"
+    return (
+        f"a 1e3-scale estimate is held to [{float(sh.min()):.2f}, {float(sh.max()):.2f}] "
+        f"and never reverses; at a realistic 0.05 spread it never binds"
+    )
+
+
+@check("test_floor_property_survives_the_clamp")
+def _floor_clamp():
+    """P-7.1 must hold for BOTH modes and with the clamp armed: the clamp is
+    symmetric about 1, so g=0 is still bit-for-bit the untouched command."""
+    torch.manual_seed(0)
+    v = torch.randn(200, N).abs() + 0.1
+    for mode in ("centred", "zscore"):
+        for clip in (0.0, 0.5):
+            q = PactParams(shift_mode=mode, shift_clip=clip)
+            out = steer(v, torch.randn(200, N) * 1e6, torch.zeros(200, N), q)
+            assert torch.equal(out, v), f"g=0 not bit-identical ({mode}, clip={clip})"
+    return "g=0 is bit-identical to the untouched command in both modes, clamped and not"
 
 
 @check("test_channel_pruning_keeps_everything_aligned")

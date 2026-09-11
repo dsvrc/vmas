@@ -195,6 +195,7 @@ class RoadStructure:
             raise ValueError("every element must have a finite positive capacity")
         self._centre_points: Optional[Tensor] = None
         self._centre_owner: Optional[Tensor] = None
+        self._cloud_on: Dict[str, Tuple[Tensor, Tensor]] = {}
 
     # -- geometry, for locating a vehicle on the medium ---------------------
 
@@ -223,11 +224,117 @@ class RoadStructure:
         return self._centre_points, self._centre_owner
 
     def locate(self, pos: Tensor) -> Tensor:
-        """Nearest element to each position.  ``pos (B, N, 2) -> (B, N)``."""
+        """Nearest element to each position.  ``pos (B, N, 2) -> (B, N)``.
+
+        The device copy is cached: this sits on the per-step path and moving
+        the cloud host->device every step is a transfer you pay for nothing.
+        """
         pts, own = self.centre_cloud()
-        pts, own = pts.to(pos.device), own.to(pos.device)
+        key = str(pos.device)
+        cached = self._cloud_on.get(key)
+        if cached is None:
+            cached = (pts.to(pos.device), own.to(pos.device))
+            self._cloud_on[key] = cached
+        pts, own = cached
         d = torch.cdist(pos.reshape(-1, 2), pts)
         return own[d.argmin(dim=-1)].reshape(pos.shape[:-1])
+
+    # -- device -------------------------------------------------------------
+
+    def to(self, device) -> "RoadStructure":
+        """Move the structural tensors onto ``device``, in place.
+
+        Without this, ``capacity`` stays on the CPU while the medium's loading
+        is computed on the training device, and every severity arm dies on the
+        first step with a device mismatch -- which is why ``DEVICE=cuda`` could
+        never have run.
+        """
+        self.capacity = self.capacity.to(device)
+        self.length = self.length.to(device)
+        self.lanes = self.lanes.to(device)
+        for attr in ("_centre_points", "_centre_owner", "_route_mask_cache"):
+            t = getattr(self, attr, None)
+            if isinstance(t, Tensor):
+                setattr(self, attr, t.to(device))
+        self._cloud_on = {}
+        return self
+
+    # -- route geometry, for a host that follows the centre line -------------
+
+    def route_geometry(
+        self, routes: Sequence[Sequence[int]], n_samples: int = 512
+    ) -> Dict[str, Tensor]:
+        """Resample each route's centre line to a common length, by ARC LENGTH.
+
+        Returns tensors indexed ``[route, sample]``:
+
+        ==============  =========================================================
+        ``point``       ``(P, K, 2)`` position
+        ``yaw``         ``(P, K)``    tangent heading
+        ``half_width``  ``(P, K)``    half the lane width of the owning element
+        ``element``     ``(P, K)``    which element index the sample belongs to
+        ``spacing``     ``(P,)``      metres per sample
+        ``length``      ``(P,)``      total route length
+        ==============  =========================================================
+
+        ``element`` is what lets a host read "which element is this vehicle on"
+        as an O(1) gather off its own progress index, instead of a nearest
+        neighbour search over the whole map every step.  It is the same answer:
+        the sample's owning element is structure, not run data.
+
+        The declared loops are closed cycles on this map (verified: join gaps
+        and closure are exactly 0.0), so the resampling wraps.
+        """
+        pts: List[Tensor] = []
+        yaws: List[Tensor] = []
+        hw: List[Tensor] = []
+        elem: List[Tensor] = []
+        spacing: List[float] = []
+        total: List[float] = []
+
+        for r in routes:
+            xy, owner = [], []
+            for a in r:
+                c = self.lanelets[self.ids[a]].centre
+                xy.extend(c)
+                owner.extend([a] * len(c))
+            poly = torch.tensor(xy, dtype=torch.float32)
+            own = torch.tensor(owner, dtype=torch.long)
+            # close the cycle so arc length and tangents wrap correctly
+            poly = torch.cat([poly, poly[:1]], dim=0)
+            own = torch.cat([own, own[:1]], dim=0)
+
+            seg = poly[1:] - poly[:-1]
+            seg_len = seg.norm(dim=-1)
+            cum = torch.cat([torch.zeros(1), seg_len.cumsum(0)])
+            L = float(cum[-1])
+
+            want = torch.linspace(0.0, L, n_samples + 1)[:n_samples]
+            j = torch.searchsorted(cum, want.contiguous(), right=True).clamp(1, len(cum) - 1) - 1
+            t = ((want - cum[j]) / seg_len[j].clamp_min(1e-12)).unsqueeze(-1)
+            P = poly[j] + t * seg[j]
+            tang = seg[j] / seg_len[j].clamp_min(1e-12).unsqueeze(-1)
+
+            pts.append(P)
+            yaws.append(torch.atan2(tang[:, 1], tang[:, 0]))
+            elem.append(own[j])
+            hw.append(
+                torch.tensor(
+                    [self.lanelets[self.ids[int(a)]].width / 2.0 for a in own[j]],
+                    dtype=torch.float32,
+                )
+            )
+            spacing.append(L / n_samples)
+            total.append(L)
+
+        return {
+            "point": torch.stack(pts),
+            "yaw": torch.stack(yaws),
+            "half_width": torch.stack(hw),
+            "element": torch.stack(elem),
+            "spacing": torch.tensor(spacing, dtype=torch.float32),
+            "length": torch.tensor(total, dtype=torch.float32),
+        }
 
     # -- lane grouping ------------------------------------------------------
 

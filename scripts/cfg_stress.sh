@@ -6,8 +6,8 @@
 #  beyond-physical stress test EVERYWHERE it appears, including in figures.
 #  It is not a headline number and must never be quoted as one.
 #
-#  Its use is that the harm is 1.59x free-flow here against 1.07x at sigma = 1,
-#  so if the mechanism works at all it should be most visible in this row.
+#  Its use is that the harm is far larger here than at sigma = 1, so if the
+#  mechanism works at all it should be most visible in this row.
 
 source "$(dirname "$0")/_common.sh"
-run_config stress task.ns_severity=3.0 task.n_agents=40
+run_config stress task.ns_severity=3.0

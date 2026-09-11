@@ -51,6 +51,12 @@ ns_mean_preserve: false      # NS-5.1: normalise g by its own cycle mean so only
 ns_observe_loading: true     # II.2: the agent observes its OWN relative excess,
                              # ONE STEP STALE. Proprioception, not privilege.
 ns_route_set: loops
+ns_exclude_self: true        # I.2. The loading an agent experiences is PEER
+                             # loading: its own vehicle does not slow it down.
+                             # With its own unit left in the load a LONE agent
+                             # reads harm 1.034 at sigma=1 -- it fails the
+                             # spec's own practical test. Set false only to
+                             # reproduce that for the ablation.
 
 # ---------------------------------------------------------------------------
 # PACT-1. Read by the method layer only; the dial never sees these keys.
@@ -72,3 +78,12 @@ pact_p0: 10.0
 pact_y_clip: 10.0            # declared outlier bound on the sensor; report
                              # clip_frac
 pact_warmup: 200             # steps before any reliance is applied
+pact_shift_mode: centred     # shift = 1 - g*kappa*(pred - fleet mean pred).
+                             # "zscore" is URB's literal form, kept for the
+                             # ablation: it standardises away the SIZE of the
+                             # disturbance, and unclamped at kappa=1 trust=0.9
+                             # it commanded 14% of agent-steps to REVERSE
+                             # against a real harm of 7-9%.
+pact_shift_clip: 0.5         # guard rail: |shift - 1| <= 0.5. Symmetric about
+                             # 1, so P-7.1 stays exact. Never binds at
+                             # realistic spreads.

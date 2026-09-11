@@ -1,0 +1,132 @@
+defaults:
+  - road_ns_lanelet_flow_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# The host: road_ns/flow.py.  Same CPM Lab CommonRoad map, same capacities,
+# same seven reference loops and the same KinematicBicycle that
+# vmas/road_traffic uses -- on a vectorised vehicle model.
+#
+#   measured, CPU, via vmas.make_env, at THIS config (16 ctrl + 24 background):
+#     vmas/road_traffic    N=40 envs=16   173    ms/frame  ->  58 h per arm-seed
+#     road_ns/lanelet_flow N=16 envs=600    0.271 ms/frame ->   5.4 min  (blind)
+#     road_ns/lanelet_flow N=16 envs=600    0.348 ms/frame ->   7.0 min  (pact)
+#     road_ns/lanelet_flow N=40 envs=600    0.838 ms/frame ->  16.8 min
+#
+# road_ns/road_traffic stays registered: run it at low N as the provenance row.
+# ---------------------------------------------------------------------------
+max_steps: 200
+n_agents: 16                 # CONTROLLABLE vehicles.  With flow_n_background
+                             # below, the fleet is 16 of 40 -- URB's own 40%
+                             # operating point, committed on the Part C
+                             # decomposition BEFORE any method code ran
+                             # (NS-4.1).  Coordination gap there: 26.7%.
+n_nearing_agents_observed: 4 # limited sensor range, as road_traffic models it
+
+flow_n_samples: 512          # centre-line samples per route.  Spacing is then
+                             # 0.017-0.028 m against a maximum travel of 0.050 m
+                             # per step, which is what makes the windowed
+                             # progress search exact.
+flow_n_lookahead: 3          # short-term reference points, as road_traffic's
+                             # n_points_short_term
+flow_lookahead_stride: 6
+flow_search_window: 12       # +-12 samples ~ 0.2-0.33 m, ~6x the furthest a
+                             # vehicle can move in one step.  Raise this if you
+                             # raise max_speed or dt.
+flow_respawn: true           # a collided or off-road vehicle is re-placed and
+                             # the episode CONTINUES.  road_traffic ends the
+                             # whole env on any collision, which at N=40 was
+                             # measured at 94% of env-steps terminating --
+                             # episodes about one step long, no horizon at all
+                             # for a congestion study.
+flow_reroute_on_lap: true    # a vehicle that completes its loop draws a new
+                             # route.  This is the only source of route turnover
+                             # in an episode, and without it every agent's basis
+                             # row is CONSTANT for the whole episode and there
+                             # is nothing for the estimator to identify
+                             # (II.9 gate 5: the channels must not be inert).
+flow_n_background: 24        # vehicles NOBODY controls, driving their route at
+                             # a fixed pace.  They enter the element load and
+                             # nothing else.
+                             #
+                             # 16 controllable of 40 total is URB's own 40%
+                             # operating point, and it is the only way the I.5
+                             # decomposition has a Delta_fixed term at all: an
+                             # all-agent fleet is 100% controllable, irreducible
+                             # is 0 at EVERY fleet size, and NS-4.2's prediction
+                             # -- the gap rises with controllable share because
+                             # irreducible load disappears while peer load does
+                             # not -- becomes untestable.
+                             #
+                             # Committed decomposition at sigma=1 (road_ns/report.py):
+                             #      8/40  irred 79.8  own 17.3  PEER  2.9
+                             #     16/40  irred 55.7  own 17.6  PEER 26.7   <- here
+                             #     24/40  irred 32.6  own 17.7  PEER 49.6
+                             #     32/40  irred  9.4  own 17.8  PEER 72.8
+                             #     40/40  irred  0.0  own 17.1  PEER 82.9
+                             # Sweep the controllable share with cfg_fleet.sh,
+                             # which holds n_agents + flow_n_background at 40.
+flow_background_speed: 0.6   # m/s. Slower than the agents' 1.0 ceiling, so the
+                             # background is congestion rather than a moving
+                             # wall that agents can simply follow.
+flow_integration: rk4        # as road_traffic.  "euler" is ~4x cheaper in the
+                             # dynamics and belongs in the ablation, not here.
+
+# ---------------------------------------------------------------------------
+# The severity dial.  TASK physics: this block reaches EVERY arm (NS-3.1).
+# ---------------------------------------------------------------------------
+ns_severity: 1.0             # sigma. 0 gives harm == 1.0 EXACTLY at every
+                             # driver value, so the stock task is recovered bit
+                             # for bit. sigma > 1 is a beyond-physical stress
+                             # test and must be labelled as such everywhere.
+ns_period: 100               # one weather cycle
+ns_wet_fraction: 0.5         # the remaining half is EXACTLY dry -- that is what
+                             # makes NS-2.5's placebo regime provable rather
+                             # than merely small
+ns_alpha: 2.28               # f(u) = 1 + alpha*u. LINEAR, not the BPR quartic:
+                             # those coefficients are calibrated near capacity
+                             # and this medium runs well below it. PLACEHOLDER
+                             # inherited from URB -- re-derive with
+                             # road_ns/probe.py on this instance before quoting
+                             # any result (III.1's stated procedure).
+ns_mean_preserve: false      # NS-5.1: normalise g by its own cycle mean so only
+                             # the shape varies and no capacity is removed
+ns_observe_loading: true     # II.2: the agent observes its OWN relative excess,
+                             # ONE STEP STALE. Proprioception, not privilege.
+ns_route_set: loops
+ns_exclude_self: true        # I.2. The loading an agent experiences is PEER
+                             # loading: its own vehicle does not slow it down.
+                             # With its own unit left in the load a LONE agent
+                             # reads harm 1.034 at sigma=1 and 1.139 at sigma=3
+                             # -- it fails the spec's own practical test, and it
+                             # puts a term in the PACT target that the basis
+                             # (strictly j != i) structurally cannot explain.
+                             # Set false only to reproduce that for the ablation.
+
+# ---------------------------------------------------------------------------
+# PACT-1. Read by the method layer only; the dial never sees these keys.
+# ---------------------------------------------------------------------------
+pact_enabled: false          # the arm switch
+pact_trust: 0.9              # P-5.1's INVERTED prior: near full reliance, not
+                             # half. Held CONSTANT: P-6.2's learned trust needs
+                             # the shift inside the policy's own distribution,
+                             # which continuous actions do not give for free.
+pact_kappa: 1.0              # declared, and genuinely one constant: the sensor
+                             # is already a RELATIVE excess (P-2.1), so the
+                             # shift is dimensionless without a second
+                             # normalisation.
+pact_mu: 0.999               # declared; sweep, never tune
+pact_p0: 10.0
+pact_y_clip: 10.0            # declared outlier bound on the sensor
+pact_warmup: 200             # steps before any reliance is applied
+pact_shift_mode: centred     # shift_i = 1 - g*kappa*(pred_i - mean_j pred_j).
+                             # "zscore" is URB's literal form and is kept for
+                             # the ablation only: standardising throws away the
+                             # size of the disturbance, and measured unclamped
+                             # at kappa=1, trust=0.9 it commanded 14% of
+                             # agent-steps to REVERSE against a real harm of
+                             # 7-9%. See pact1.core.PactParams.shift_mode.
+pact_shift_clip: 0.5         # guard rail only: |shift - 1| <= 0.5 so no
+                             # estimate, however diverged, can reverse a
+                             # vehicle. Symmetric about 1, so P-7.1 is exact.
+                             # At realistic spreads it never binds (measured 0%).

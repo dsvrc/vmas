@@ -3,14 +3,19 @@ from dataclasses import dataclass, MISSING
 
 @dataclass
 class TaskConfig:
-    # --- the stock task ----------------------------------------------------
+    # --- the host ----------------------------------------------------------
     max_steps: int = MISSING
     n_agents: int = MISSING
-    map_type: str = MISSING
-    is_partial_observation: bool = MISSING
     n_nearing_agents_observed: int = MISSING
-    is_observe_vertices: bool = MISSING
-    is_add_noise: bool = MISSING
+    flow_n_samples: int = MISSING
+    flow_n_lookahead: int = MISSING
+    flow_lookahead_stride: int = MISSING
+    flow_search_window: int = MISSING
+    flow_respawn: bool = MISSING
+    flow_reroute_on_lap: bool = MISSING
+    flow_n_background: int = MISSING
+    flow_background_speed: float = MISSING
+    flow_integration: str = MISSING
 
     # --- the severity dial (TASK physics: reaches EVERY arm) ---------------
     ns_severity: float = MISSING

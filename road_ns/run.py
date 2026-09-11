@@ -2,6 +2,7 @@
 #  through THIS, with severity supplied from outside the method, so the
 #  baselines are bit-for-bit the ones BenchMARL ships.
 #
+#      python road_ns/run.py algorithm=ippo task=road_ns/lanelet_flow
 #      python road_ns/run.py algorithm=ippo task=road_ns/road_traffic
 #
 #  Identical to benchmarl/run.py except that it guarantees the BenchMARL being
@@ -25,7 +26,7 @@ from omegaconf import DictConfig, OmegaConf  # noqa: E402
 import benchmarl  # noqa: E402,F401  (registers the hydra schemas)
 from benchmarl.hydra_config import load_experiment_from_hydra  # noqa: E402
 
-_TASK = "road_ns/road_traffic"
+_TASKS = ("road_ns/road_traffic", "road_ns/lanelet_flow")
 
 
 def _check_import_is_this_checkout() -> None:
@@ -40,10 +41,12 @@ def _check_import_is_this_checkout() -> None:
         )
     from benchmarl.environments import task_config_registry
 
-    if _TASK not in task_config_registry:
+    missing = [t for t in _TASKS if t not in task_config_registry]
+    if missing:
         raise RuntimeError(
-            f"{_TASK} is not registered.  Check that "
-            "benchmarl/environments/__init__.py lists RoadNsTask in `tasks`."
+            f"{missing} not registered.  Check that "
+            "benchmarl/environments/__init__.py lists RoadNsTask in `tasks` and "
+            "that RoadNsTask declares a member per task."
         )
 
 

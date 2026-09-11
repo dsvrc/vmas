@@ -10,4 +10,4 @@
 #  itself off.
 
 source "$(dirname "$0")/_common.sh"
-run_config placebo task.ns_severity=3.0 task.ns_wet_fraction=0.0 task.n_agents=40
+run_config placebo task.ns_severity=3.0 task.ns_wet_fraction=0.0

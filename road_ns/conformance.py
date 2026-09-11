@@ -25,6 +25,7 @@ from road_ns.dial import (  # noqa: E402
     driver_A,
     harm,
     loading,
+    loading_by_route,
     performance,
     sensitivity,
 )
@@ -226,6 +227,65 @@ def _binding():
     )
 
 
+@check("test_lone_agent_reads_harm_exactly_one")
+def _lone_harm():
+    """I.2's own practical test, run on the function the ENVIRONMENT calls.
+
+    "An agent alone in the environment must read a harm of exactly 1.0 in the
+    worst storm you can dial.  If a single agent suffers, the driver is adding
+    to the loss somewhere and NS-1.4 is violated."
+
+    The suite used to check this only on ``structure.coupling`` (the operator)
+    and on ``harm(0, 0)`` (u supplied by hand).  Neither touches the sensor the
+    run uses, and the sensor failed it: with the agent's own vehicle left in the
+    element load a lone agent read 1.0336 at sigma=1 and 1.1388 at sigma=3 --
+    slowing ITSELF down, which is a level shift, not a coupling.
+    """
+    mask = STRUCT.route_mask(ROUTES)
+    route_of = torch.tensor([[0]])
+    here = torch.tensor([[ROUTES[0][3]]])          # standing on its own route
+    load = torch.zeros(1, STRUCT.n_elements)
+    load.scatter_add_(1, here, torch.ones_like(here, dtype=load.dtype))
+    worst = 0.0
+    for sigma in (0.5, 1.0, 3.0, 10.0):
+        p = DialParams(severity=sigma)
+        g = dial_g(driver_A(torch.tensor([25]), p), sensitivity(STRUCT, p), p)
+        u_d, _ = loading_by_route(load, g, STRUCT, mask, route_of, here)
+        u_n, _ = loading_by_route(load, torch.ones_like(g), STRUCT, mask, route_of, here)
+        h = float(harm(u_d, u_n, p))
+        assert float(u_d) == 0.0, f"lone agent read peer loading {float(u_d)} at sigma={sigma}"
+        assert h == 1.0, f"lone agent read harm {h:.6f} at sigma={sigma}, must be 1.0"
+        worst = max(worst, h)
+    return "peer loading exactly 0 and harm exactly 1.0 at sigma in {0.5, 1, 3, 10}"
+
+
+@check("test_self_exclusion_is_the_zero_diagonal")
+def _self_exclusion():
+    """The sensor's self-exclusion must be exactly one unit at exactly one
+    element -- not an approximation, and not applied to elements the agent is
+    not standing on."""
+    mask = STRUCT.route_mask(ROUTES)
+    p = DialParams(severity=1.0)
+    g = dial_g(driver_A(torch.tensor([25]), p), sensitivity(STRUCT, p), p)
+    fleet = _fleet(8)
+    route_of = torch.tensor([fleet])
+    here = torch.tensor([[ROUTES[r][1] for r in fleet]])
+    load = torch.zeros(1, STRUCT.n_elements)
+    load.scatter_add_(1, here, torch.ones_like(here, dtype=load.dtype))
+    u_in, _ = loading_by_route(load, g, STRUCT, mask, route_of, None)
+    u_ex, _ = loading_by_route(load, g, STRUCT, mask, route_of, here)
+    assert torch.all(u_ex <= u_in + 1e-6), "excluding self raised the loading"
+    assert torch.all(u_ex >= 0.0), "peer loading went negative"
+    # removing a unit that is NOT on the binding element must change nothing
+    far = torch.full_like(here, ROUTES[fleet[0]][-1])
+    u_far, _ = loading_by_route(load, g, STRUCT, mask, route_of, far)
+    assert not torch.equal(u_far, u_ex), "self-exclusion ignored which element was given"
+    return (
+        f"N=8: u with self {float(u_in.mean()):.3f} -> peer-only "
+        f"{float(u_ex.mean()):.3f}, never negative, element-specific"
+    )
+
+
 # ===========================================================================
 #  ceiling
 # ===========================================================================
@@ -234,12 +294,21 @@ def _binding():
 @check("test_ceiling_shares_are_a_partition")
 def _partition():
     p = DialParams()
-    fleet = _fleet()
+    # A REAL split.  This used to be `_fleet()[:16]` against `_fleet()[16:]`
+    # with _fleet() returning exactly 16 agents -- so the background was empty,
+    # the irreducible share was 0 by construction, and the test silently
+    # duplicated test_all_controllable_has_no_irreducible_share.
+    fleet = _fleet(40)
     d = decompose(STRUCT, ROUTES, fleet[:16], fleet[16:], p)
+    assert d.n_background == 24, d.n_background
+    assert d.irreducible > 0.0, "a fleet with background must have an irreducible share"
     total = d.irreducible + d.own + d.peer
     assert abs(total - 1.0) < 1e-5, f"shares sum to {total}"
     assert min(d.irreducible, d.own, d.peer) >= 0.0
-    return f"irreducible {d.irreducible:.1%} + own {d.own:.1%} + peer {d.peer:.1%} = 1"
+    return (
+        f"16 controllable of 40: irreducible {d.irreducible:.1%} + own {d.own:.1%} "
+        f"+ peer {d.peer:.1%} = 1"
+    )
 
 
 @check("test_all_controllable_has_no_irreducible_share")
@@ -268,7 +337,7 @@ def _gap_grows():
 @check("test_placebo_produces_no_excess_to_attribute")
 def _placebo_no_excess():
     p = DialParams(severity=3.0)
-    fleet = _fleet()
+    fleet = _fleet(40)
     d = decompose(STRUCT, ROUTES, fleet[:16], fleet[16:], p, driver_value=0.0)
     assert d.g_mean == 1.0, f"g = {d.g_mean} on a dry day"
     return "on a dry day there is no excess to attribute, at any severity"
