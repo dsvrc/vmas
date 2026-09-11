@@ -12,6 +12,7 @@ from .pettingzoo.common import PettingZooClass, PettingZooTask
 from .smacv2.common import Smacv2Class, Smacv2Task
 from .vmas.common import VmasClass, VmasTask
 from .road_ns.common import RoadNsClass, RoadNsTask
+from .simple_ns.common import SimpleNsClass, SimpleNsTask
 from .vmas_ns.common import VmasNsClass, VmasNsTask
 
 # The enum classes for the environments available.

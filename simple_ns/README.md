@@ -3,10 +3,18 @@
 One layer, four stock hosts, no edits to the installed vmas.
 
 ```bash
-python simple_ns/conformance.py                 # 11 offline checks, torch only  ~2 s
-python simple_ns/smoke.py                       # 10 in-simulator checks         ~1 min
+python simple_ns/check_plumbing.py              # config consistency, torch only  ~1 s
+python simple_ns/conformance.py                 # 11 offline checks, torch only   ~2 s
+python simple_ns/smoke.py                       # 10 in-simulator checks          ~1 min
 python simple_ns/calibrate.py --hosts transport # pick sigma, before any training
 ```
+
+Run `check_plumbing.py` first. It catches the failures that otherwise surface
+only on the cluster: a task enum listed in `benchmarl/environments/__init__.py`
+but never imported (which killed the first launch with a `NameError` inside
+`import benchmarl`), a yaml key with no dataclass field, a dataclass field with
+no yaml value, a knob the layer never reads, and any drift in the dial or the
+method between the four hosts.
 
 ## Which cell this is
 
