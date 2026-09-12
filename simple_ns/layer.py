@@ -46,6 +46,8 @@ __all__ = ["ExertionMixin", "PactMixin", "NS_KWARGS", "PACT_KWARGS"]
 
 NS_KWARGS = (
     "ns_severity",
+    "ns_channel",
+    "ns_droop_max",
     "ns_period",
     "ns_wet_fraction",
     "ns_loss_at_sigma1",
@@ -93,6 +95,8 @@ class ExertionMixin:
 
         self.ns = DialParams(
             severity=float(raw.get("ns_severity", 1.0)),
+            channel=str(raw.get("ns_channel", "droop")),
+            droop_max=float(raw.get("ns_droop_max", 0.9)),
             period=int(raw.get("ns_period", 100)),
             wet_fraction=float(raw.get("ns_wet_fraction", 0.5)),
             loss_at_sigma1=float(raw.get("ns_loss_at_sigma1", 0.14)),
@@ -144,7 +148,12 @@ class ExertionMixin:
         f = dict(device=device, dtype=torch.float32)
         self._step = torch.zeros(B, device=device, dtype=torch.long)
         self._u_prev = torch.zeros(B, N, D, **f)
-        self._Q = torch.zeros(B, N, r, 2, **f)
+        # droop channels are scalar draws; shove channels are vectors
+        self._Q = (
+            torch.zeros(B, N, r, **f)
+            if self.ns.channel == "droop"
+            else torch.zeros(B, N, r, 2, **f)
+        )
         self._ehat = torch.zeros(B, N, 2, **f)
         self._x = torch.zeros(B, N, r, **f)
         self._load = torch.zeros(B, N, **f)
@@ -234,16 +243,33 @@ class ExertionMixin:
         a = driver_A(self._step, self.ns)
         self._A = a
 
-        Q, q, ehat, x = self.coupling.step_channels(pos, self._u_prev, self._Q)
-        self._Q, self._ehat, self._x = Q, ehat, x
+        if self.ns.channel == "droop":
+            #  A draw on a shared rail is scalar: no direction to project onto.
+            Q, x = self.coupling.step_draw(pos, self._u_prev, self._Q)
+            self._Q, self._x = Q, x
+            self._ehat = torch.zeros_like(self._ehat)
+        else:
+            Q, q, ehat, x = self.coupling.step_channels(pos, self._u_prev, self._Q)
+            self._Q, self._ehat, self._x = Q, ehat, x
 
         beta = beta_star(a, self.ns)  # (B, r)
-        # normalised to the declared reference, and scaled to the receiver's own
-        # action range, so "0.14 of the action range at the peak" is literal
+        # normalised to the declared reference so sigma means the same physical
+        # severity in every host (see Coupling.load_norm)
         self._load = (beta.unsqueeze(1) * x).sum(-1) / self._load_norm
-        self._load = self._load * self._u_range[:, 0].reshape(1, -1)
+        if self.ns.channel != "droop":
+            # the shove channel is a force, so it is scaled to the action range;
+            # droop is already a FRACTION of delivered force and must not be
+            self._load = self._load * self._u_range[:, 0].reshape(1, -1)
+        else:
+            self._load = self._load.clamp(0.0, self.ns.droop_max)
 
-        if self._direct:
+        if self._direct and self.ns.channel == "droop":
+            #  The (B) control for droop: the rail sags by the same fraction for
+            #  everyone, from the driver alone, with no sum over j != i.  A lone
+            #  jack then feels it, which is exactly what makes this cell (B).
+            mag = self.ns.severity * self.ns.loss_at_sigma1 * a.reshape(-1, 1)
+            self._load = mag.expand_as(self._load).clamp(0.0, self.ns.droop_max)
+        elif self._direct:
             #  THE (B) CONTROL -- exogenous, not interaction-mediated.
             #
             #  Same driver, same severity, same scale, same reward, same ladder.
@@ -282,6 +308,12 @@ class ExertionMixin:
             self._d = -direction * self._load.unsqueeze(-1)
             # the sensor still measures what it measures
             self._ehat = -direction[..., :2]
+        elif self.ns.channel == "droop":
+            #  Nothing to build: a supply sag is a scalar derate applied to the
+            #  command in process_action, not a force added to it.  _d stays zero
+            #  so the additive path cannot also fire, and ns_dmag then reports
+            #  the derate rather than a phantom force.
+            self._d = torch.zeros_like(self._d)
         else:
             d = ehat * self._load.unsqueeze(-1)
             if self._action_dim != 2:
@@ -301,6 +333,14 @@ class ExertionMixin:
         never produces one; the layer above (PACT) overrides this."""
         return None
 
+    def _trust_for(self, index: int) -> Tensor:
+        """Applied reliance for the droop channel.  Zero without a compensator,
+        which is what makes the blind arm bit-identical to the stock host."""
+        return torch.zeros(self._load.shape[0], device=self._load.device)
+
+    def _pred_for(self, index: int) -> Tensor:
+        return torch.zeros(self._load.shape[0], device=self._load.device)
+
     def process_action(self, agent: Agent) -> None:
         if agent is self.world.agents[0]:
             self._disturbance()
@@ -309,13 +349,28 @@ class ExertionMixin:
         u_cmd = agent.action.u
 
         corr = self._correction(i)
-        u_sent = u_cmd if corr is None else u_cmd - corr
 
-        # NS-1.4: the disturbance is an unmodelled force added to what the
-        # actuator was asked for.  The reward function is never touched.  At
-        # sigma = 0 the load is exactly 0.0, so this is u + 0.0 -- bit for bit
-        # the stock command.
-        u_exec = u_sent + self._d[:, i]
+        if self.ns.channel == "droop":
+            #  THE SHARED-SUPPLY SAG, and its exact inverse.
+            #
+            #      delivered = commanded * (1 - droop)
+            #
+            #  The compensation is the feed-forward an industrial rig actually
+            #  uses: ask for more, by exactly the factor you expect to lose.
+            #  With a correct estimate the two cancel identically.  At sigma = 0
+            #  the droop is exactly 0.0 and this is u * 1.0 -- bit for bit the
+            #  stock command.  The reward function is never touched; the lift is
+            #  simply weaker.
+            g = self._trust_for(i)
+            pred = self._pred_for(i)
+            ff = (1.0 - (g * pred).clamp(0.0, self.ns.droop_max)).unsqueeze(-1)
+            u_sent = u_cmd / ff
+            u_exec = u_sent * (1.0 - self._load[:, i]).unsqueeze(-1)
+        else:
+            u_sent = u_cmd if corr is None else u_cmd - corr
+            # NS-1.4: an unmodelled force added to what the actuator was asked
+            # for.  At sigma = 0 the load is exactly 0.0, so this is u + 0.0.
+            u_exec = u_sent + self._d[:, i]
 
         lo, hi = -self._u_range[i], self._u_range[i]
         # clamp(NaN) is NaN, so sanitise first -- see _after_disturbance
@@ -328,7 +383,19 @@ class ExertionMixin:
         # without any privileged quantity.  Note this is the residual of the
         # command actually sent, so compensating does not blind the estimator --
         # which is what lets trust stay armed once it is working.
-        self._y[:, i] = ((clipped - u_sent) * self._ehat[:, i, : self._action_dim]).sum(-1)
+        if self.ns.channel == "droop":
+            #  P-2.1 proprioception: the jack knows the flow it asked for and can
+            #  measure the force it delivered, so the fractional shortfall is
+            #  directly observable.  Nothing privileged is used.
+            asked = u_sent.norm(dim=-1)
+            got = clipped.norm(dim=-1)
+            self._y[:, i] = torch.where(
+                asked > 1e-9, 1.0 - got / asked.clamp_min(1e-9), torch.zeros_like(asked)
+            )
+        else:
+            self._y[:, i] = (
+                (clipped - u_sent) * self._ehat[:, i, : self._action_dim]
+            ).sum(-1)
 
         if self.ns.severity > 0:
             self._n_hit += (self._load[:, i].abs() > 0).sum()
@@ -590,6 +657,13 @@ class PactMixin(ExertionMixin):
             torch.where(ready, self._trust_const, 0.0).unsqueeze(-1) * self._conf
         )
 
+        if self.ns.channel == "droop":
+            #  No vector correction: the droop inverse is applied in
+            #  process_action as a scalar gain on the command.  _corr stays zero
+            #  so the additive path cannot also fire.
+            self._corr = torch.zeros_like(self._corr)
+            return
+
         dirn = self._ehat
         if self._action_dim != 2:
             pad = torch.zeros(
@@ -676,6 +750,16 @@ class PactMixin(ExertionMixin):
         if not self.pact_enabled:
             return None
         return self._corr[:, index]
+
+    def _trust_for(self, index: int) -> Tensor:
+        if not self.pact_enabled:
+            return torch.zeros(self._load.shape[0], device=self._load.device)
+        return self._trust[:, index]
+
+    def _pred_for(self, index: int) -> Tensor:
+        if not self.pact_enabled:
+            return torch.zeros(self._load.shape[0], device=self._load.device)
+        return self._pred[:, index]
 
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         info = super().info(agent)

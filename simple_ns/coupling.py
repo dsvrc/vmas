@@ -139,6 +139,36 @@ class Coupling:
         x = (Q * ehat.unsqueeze(2)).sum(-1)  # (B,N,r)
         return Q, q, ehat, x
 
+    def step_draw(
+        self, pos: Tensor, u_prev: Tensor, Q_prev: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """The ``droop`` channel: each class's FLOW DEMAND reaching agent i.
+
+            Q_m,i(t) = rho Q_m,i(t-1)
+                       + (1-rho) * sum_{j != i, type(j)=m} W_ij * ||u_j(t-1)||
+
+        A draw on a shared pressure rail is a SCALAR, not a vector: what costs
+        you pressure is how much your neighbours are pulling, not which way they
+        are pushing.  So unlike ``step_channels`` there is no direction to
+        project onto -- the channels ARE the filtered draws, and the model is
+        already linear in them.
+
+        That also makes this channel simpler to identify than the additive one:
+        no unit vector has to be estimated or agreed on, and the regressor cannot
+        be degraded by a direction that happens to be near zero.
+
+        Returns ``(Q, x)``, both ``(B, N, r)``.
+        """
+        W = self.W(pos)  # (B,N,N)
+        draw = u_prev.norm(dim=-1)  # (B,N) -- the magnitude each peer is pulling
+        parts = [
+            torch.bmm(W * self.is_type[m].reshape(1, 1, -1), draw.unsqueeze(-1)).squeeze(-1)
+            for m in range(self.r)
+        ]
+        raw = torch.stack(parts, dim=2)  # (B,N,r)
+        Q = self.p.rho * Q_prev + (1.0 - self.p.rho) * raw
+        return Q, Q
+
     def design(self, x: Tensor, ref: Tensor, scale: Tensor) -> Tensor:
         """``psi = [1, (x - ref) / scale]``.  ``(B, N, 1 + r)``.
 
@@ -190,9 +220,14 @@ class Coupling:
             pos = pos_ref[k % pos_ref.shape[0]].unsqueeze(0)
             ang = torch.rand(1, self.n, generator=gen) * 2 * math.pi
             u = torch.stack([ang.cos(), ang.sin()], dim=-1)
-            Q = torch.zeros(1, self.n, self.r, 2)
-            for _ in range(3):  # let the filtered channel reach steady state
-                Q, _, _, x = cpu.step_channels(pos, u, Q)
+            if self.p.channel == "droop":
+                Q = torch.zeros(1, self.n, self.r)
+                for _ in range(3):  # let the filtered channel reach steady state
+                    Q, x = cpu.step_draw(pos, u, Q)
+            else:
+                Q = torch.zeros(1, self.n, self.r, 2)
+                for _ in range(3):
+                    Q, _, _, x = cpu.step_channels(pos, u, Q)
             vals.append(x.reshape(-1, self.r))
         V = torch.cat(vals, dim=0)
         ref = V.mean(dim=0)
@@ -256,10 +291,14 @@ class Coupling:
             # the filtered channel at its steady state, which is what a sustained
             # exertion actually produces -- (1-rho) sum over one step understates
             # it by 1/(1-rho)
-            Q0 = torch.zeros(1, self.n, self.r, 2)
-            Q = Q0
-            for _ in range(3):
-                Q, _, _, x = cpu.step_channels(pos, u, Q)
+            if self.p.channel == "droop":
+                Q = torch.zeros(1, self.n, self.r)
+                for _ in range(3):
+                    Q, x = cpu.step_draw(pos, u, Q)
+            else:
+                Q = torch.zeros(1, self.n, self.r, 2)
+                for _ in range(3):
+                    Q, _, _, x = cpu.step_channels(pos, u, Q)
             tot += float((send.reshape(1, 1, -1) * x).sum(-1).mean())
         ref = tot / samples
         if not (ref > 0):

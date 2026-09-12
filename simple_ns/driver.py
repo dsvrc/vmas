@@ -67,6 +67,61 @@ class DialParams:
     """sigma.  0.0 makes the disturbance EXACTLY zero at every driver value, so
     the stock scenario is recovered bit for bit."""
 
+    channel: str = "droop"
+    """How the coupling reaches the actuator.  ``droop`` or ``shove``.
+
+    ``droop`` -- SHARED SUPPLY SAG.  The physical story, and the default:
+
+        Several hydraulic jacks raise one load together off ONE power pack: one
+        pump, one accumulator, one pressure rail.  Each jack's controller asks
+        for a flow and the rail delivers what it can.  When several jacks draw at
+        once the rail SAGS, and every jack delivers less force than it asked for.
+
+        How far it sags for a given draw is the rail's stiffness, and that is not
+        constant.  Over a shift the fluid warms, viscosity falls, leakage past
+        pump and valve clearances rises, and the accumulator's gas pre-charge
+        bleeds down.  The rail gets softer as the day goes on.  This is why
+        synchronised-lift rigs are commissioned cold and then drift: the jacks
+        that were matched at 08:00 are not matched at 14:00.  Operators know it,
+        and the standard mitigation is exactly a per-jack pressure feed-forward
+        -- estimate the droop, command extra.
+
+    That story is worth the space because every clause is a requirement:
+
+    * INTERACTION-MEDIATED.  The sag you feel is caused by what the OTHER jacks
+      draw.  One jack alone on the rail gets full pressure at any fluid
+      temperature, so N=1 is exactly undisturbed -- structurally, because the sum
+      runs over j != i.
+    * EXOGENOUS DRIVER.  Fluid temperature over a shift.  A function of the clock
+      that no jack controls, and a hydraulics engineer names it unprompted when
+      asked what makes this harder some days.
+    * NEVER A REWARD TERM.  It removes delivered force.  The reward function is
+      untouched; the lift is simply worse.
+    * INVERTIBLE, WITH A REAL SATURATION.  Commanding extra to cover the droop is
+      what industrial rigs actually do, so the method's channel is the one the
+      domain already uses -- and it stops working at the relief valve, which is
+      where sigma* comes from rather than from a number we chose.
+    * THE CLASSES ARE REAL.  Jacks on a rig are not identical: different bores,
+      different hose lengths and diameters back to the manifold.  A jack on a
+      long thin hose both FEELS more droop and CAUSES less.  That is exactly the
+      public ``recv`` / unknown ``send`` split -- you know your own plumbing, and
+      you do not know what a given neighbour's draw costs you TODAY, because that
+      depends on the fluid state.
+
+    It also lands on the right failure mode.  A derate on a LIFT is what drops
+    the load: you ask for the force that holds station, you get less, and the
+    beam tips fastest on whichever support is drooping worst.  The disturbance
+    attacks the levelling loop, which is the loop this task actually fails at --
+    rather than shoving the supports sideways, which is a disturbance the task
+    does not care about.
+
+    ``shove`` is the additive variant: the medium transmits the neighbours'
+    exertion as a force in the agent's own action space.  Right for a rigid
+    shared payload (force fight through the structure) or a fluid (rotor wake),
+    and it is the channel the transport and navigation rows use.  Kept because it
+    is a different cell of II.6 and the comparison between them is informative,
+    not because either is a fallback for the other."""
+
     # -- the driver (I.3 reference form) ------------------------------------
     period: int = 100
     """Steps per driver cycle."""
@@ -122,6 +177,12 @@ class DialParams:
     structure -- the falloff of a wake or of a compliant linkage -- evaluated on
     observed geometry, exactly as ``road_ns``'s loading is the declared operator
     evaluated on observed occupancy."""
+
+    droop_max: float = 0.9
+    """The relief valve.  Delivered force is ``(1 - droop)`` of commanded, and
+    droop is clamped below this, so a support never delivers less than 10% nor
+    reverses.  A physical bound on a physical quantity, not a tuning knob: past
+    it the rig is not drooping, it is failed."""
 
     y_clip: float = 10.0
     """P-2.1's declared outlier bound on the sensor."""

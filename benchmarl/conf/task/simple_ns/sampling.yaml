@@ -22,6 +22,19 @@ spawn_same_pos: False
 ns_severity: 1.0             # sigma. 0 makes the disturbance EXACTLY zero at
                              # every driver value, so the stock scenario is
                              # recovered bit for bit and this is how B0 is run.
+ns_channel: shove            # FORCE FIGHT / WAKE -- the medium transmits the
+                             # neighbours' exertion as a force in this agent's own
+                             # action space: partners fighting through the rigid
+                             # payload, or a rotorcraft flying through its
+                             # neighbours' downwash. Additive, and invertible by
+                             # subtraction.
+                             #
+                             # balance uses `droop` instead -- see its yaml. The
+                             # two are different cells of II.6 and the comparison
+                             # between them is informative; neither is a fallback
+                             # for the other.
+ns_droop_max: 0.9           # unused by the shove channel; kept so the four
+                             # task configs stay comparable key for key.
 ns_period: 100               # steps per driver cycle
 ns_wet_fraction: 0.5         # the remaining half is EXACTLY quiet -- that is
                              # what makes NS-2.5's placebo provable rather than

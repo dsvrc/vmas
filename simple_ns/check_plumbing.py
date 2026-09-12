@@ -102,7 +102,7 @@ PACT_K = tuple_keys("PACT_KWARGS", layer)
 #  They are checked for PRESENCE and for cross-host consistency instead, which is
 #  what actually matters -- a missing key silently falls back to the dataclass
 #  default and the run is then not the run you think it is.
-DECLARED_OVERRIDES = {"ns_severity", "pact_mu"}
+DECLARED_OVERRIDES = {"ns_severity", "pact_mu", "ns_channel"}
 
 DIAL_PAIRS = [
     ("period", "ns_period"),
@@ -172,9 +172,14 @@ for host in HOSTS:
 #  four tasks" stops being true and the cross-host comparison measures nothing.
 # ---------------------------------------------------------------------------
 print("\n== across hosts ==")
-#  Severity is calibrated per host; everything else in the dial and the method
+#  Severity is calibrated per host, and the CHANNEL is chosen per host from the
+#  physics of that host -- balance is a shared-supply sag on a joint lift, the
+#  others are force fight or wake.  Everything else in the dial and the method
 #  must be identical, or "one disturbance, four tasks" is not true.
-PER_HOST_OK = {"ns_severity"}
+#
+#  ns_droop_max rides with the channel: it is the relief valve for droop and is
+#  unused by shove.
+PER_HOST_OK = {"ns_severity", "ns_channel", "ns_droop_max"}
 ref = HOSTS[0]
 drift = []
 for h in HOSTS[1:]:

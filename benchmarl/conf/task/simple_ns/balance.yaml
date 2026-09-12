@@ -25,6 +25,36 @@ package_mass: 5
 ns_severity: 1.0             # sigma. 0 makes the disturbance EXACTLY zero at
                              # every driver value, so the stock scenario is
                              # recovered bit for bit and this is how B0 is run.
+ns_channel: droop            # SHARED SUPPLY SAG -- the story for this host.
+                             # N hydraulic jacks raise one load off ONE power
+                             # pack. Each asks the rail for flow; when several
+                             # draw at once the rail SAGS and every jack delivers
+                             # less than it asked for. How far it sags for a given
+                             # draw is the rail's stiffness, and over a shift the
+                             # fluid warms, viscosity falls, leakage past pump and
+                             # valve clearances rises and the accumulator's
+                             # pre-charge bleeds down -- the rail gets softer as
+                             # the day goes on. Synchronised-lift rigs are
+                             # commissioned cold and then drift: the jacks matched
+                             # at 08:00 are not matched at 14:00.
+                             #
+                             # Why this one for balance: a derate on a LIFT is
+                             # what drops the load. You ask for the force that
+                             # holds station, you get less, and the beam tips
+                             # fastest on whichever support droops worst -- so the
+                             # disturbance attacks the LEVELLING loop, which is
+                             # the loop this task actually fails at. A sideways
+                             # shove is a disturbance balance does not care about.
+                             #
+                             # A lone jack on the rail gets full pressure at any
+                             # fluid temperature: category C, structurally.
+                             # The inverse is the feed-forward real rigs use --
+                             # command extra by the factor you expect to lose.
+ns_droop_max: 0.9           # the relief valve. Delivered force is (1-droop) of
+                             # commanded, clamped below this, so a support never
+                             # delivers under 10% nor reverses. A physical bound
+                             # on a physical quantity: past it the rig is not
+                             # drooping, it is failed.
 ns_period: 100               # steps per driver cycle
 ns_wet_fraction: 0.5         # the remaining half is EXACTLY quiet -- that is
                              # what makes NS-2.5's placebo provable rather than

@@ -13,6 +13,8 @@ class TaskConfig:
 
     # --- the exertion dial (TASK physics: reaches EVERY arm) ---------------
     ns_severity: float = MISSING
+    ns_channel: str = MISSING
+    ns_droop_max: float = MISSING
     ns_period: int = MISSING
     ns_wet_fraction: float = MISSING
     ns_loss_at_sigma1: float = MISSING
