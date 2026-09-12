@@ -34,3 +34,4 @@ class TaskConfig:
     pact_channels: str = MISSING
     pact_oracle: bool = MISSING
     pact_corr_clip: float = MISSING
+    pact_p_trace_max: float = MISSING

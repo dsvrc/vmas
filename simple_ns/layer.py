@@ -68,6 +68,7 @@ PACT_KWARGS = (
     "pact_channels",
     "pact_oracle",
     "pact_corr_clip",
+    "pact_p_trace_max",
 )
 
 
@@ -424,6 +425,7 @@ class PactMixin(ExertionMixin):
         self.pact_params = PactParams(
             mu=float(raw.get("pact_mu", 0.999)),
             p0=float(raw.get("pact_p0", 10.0)),
+            p_trace_max=float(raw.get("pact_p_trace_max", 100.0)),
             y_clip=self.ns.y_clip,
         )
         self._trust_const = float(raw.get("pact_trust", 0.9))
@@ -689,6 +691,7 @@ class PactMixin(ExertionMixin):
                 "pact_corr": self._corr[:, i].norm(dim=-1, keepdim=True),
                 "pact_updates": self.rls.n_updates[:, i : i + 1],
                 "pact_skipped": self.rls.n_skipped[:, i : i + 1],
+                "pact_bounded": self.rls.n_bounded[:, i : i + 1],
                 # how much of the disturbance the correction actually removed
                 "pact_residual": (self._load[:, i : i + 1] - one(self._pred)).abs(),
                 "pact_diverged": torch.full_like(

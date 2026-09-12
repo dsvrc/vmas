@@ -322,6 +322,7 @@ class SimpleNsClass(VmasClass):
             ("pact_corr", "correction_mag"),
             ("pact_updates", "n_updates"),
             ("pact_skipped", "n_skipped"),
+            ("pact_bounded", "n_bounded"),
             ("pact_diverged", "n_diverged"),
             # II.10's two headline columns: does the reduction hold, and is beta
             # actually being recovered (the truth is known on this instance)

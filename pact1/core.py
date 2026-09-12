@@ -48,6 +48,25 @@ __all__ = [
 @dataclass(frozen=True)
 class PactParams:
     # -- sensor (P-2.1) -----------------------------------------------------
+    p_trace_max: float = 100.0
+    """Bound on covariance windup, as a MULTIPLE of the initial trace
+    ``p0 * dim``.  Declared, not tuned.
+
+    RLS with forgetting divides P by mu every step, so in a direction the data
+    stops exciting, P grows without bound -- and the prediction built from it
+    eventually overflows.  P-4.2's dead-row skip is supposed to stop the worst of
+    it and cannot: it only catches an EXACTLY zero regressor, and a poorly
+    excited one is not zero.
+
+    Measured on a real 3M-frame transport run before this existed: 5.7 million
+    agent-steps with a non-finite prediction out of ~12 million, fit_gain NaN
+    from iteration 4 onward, and an applied correction worth 4% of the
+    disturbance.  The method was not beaten by the baseline; it never ran.
+
+    When the trace exceeds the bound P is shrunk isotropically, which preserves
+    symmetry and positive-definiteness and costs one reduction per step.
+    Set to 0 to disable, which is how the measurement above is reproduced."""
+
     y_clip: float = 10.0
 
     # -- estimator (II.4) ---------------------------------------------------
@@ -361,6 +380,9 @@ class RLS:
         )
         self.n_updates = torch.zeros(self.batch, n_agents, **f)
         self.n_skipped = torch.zeros(self.batch, n_agents, **f)
+        #  how often the windup bound had to act -- a rising count is the signal
+        #  that mu is too aggressive for the excitation this policy provides
+        self.n_bounded = torch.zeros(self.batch, n_agents, **f)
 
     def predict(self, psi: Tensor) -> Tensor:
         """``beta' psi``.  ``psi`` is ``(N, d)`` or ``(B, N, d)``."""
@@ -380,7 +402,13 @@ class RLS:
         if y.dim() == 1:
             y = y.unsqueeze(0).expand(self.batch, -1)
 
-        live = psi.abs().sum(dim=-1) > 0
+        #  P-4.2, and it was NOT firing.  psi carries an intercept column of
+        #  exactly 1, so `psi.abs().sum(-1) > 0` is true for every row ever
+        #  built and `n_skipped` was 0 on every iteration of every run.  The
+        #  regressor that matters is the CHANNELS; a row with no channel content
+        #  carries nothing about beta and must not divide P by mu.
+        chan = psi[..., 1:] if psi.shape[-1] > 1 else psi
+        live = chan.abs().sum(dim=-1) > 0
         resid = y - (self.beta * psi).sum(-1)
 
         Ppsi = torch.einsum("bnij,bnj->bni", self.P, psi)
@@ -389,6 +417,16 @@ class RLS:
         new_beta = self.beta + K * resid.unsqueeze(-1)
         new_P = (self.P - K.unsqueeze(-1) * Ppsi.unsqueeze(-2)) / self.p.mu
         new_P = 0.5 * (new_P + new_P.transpose(-1, -2))
+
+        #  Bound the windup.  Without this, a direction the policy stops exciting
+        #  grows P by 1/mu every step until the prediction overflows -- see
+        #  PactParams.p_trace_max for what that measured on a real run.
+        if self.p.p_trace_max > 0:
+            cap = self.p.p_trace_max * self.p.p0 * self.dim
+            tr = new_P.diagonal(dim1=-2, dim2=-1).sum(-1)  # (B, N)
+            shrink = (cap / tr.clamp_min(1e-12)).clamp(max=1.0)
+            new_P = new_P * shrink.unsqueeze(-1).unsqueeze(-1)
+            self.n_bounded += (shrink < 1.0).to(torch.float32)
 
         m = live.unsqueeze(-1)
         self.beta = torch.where(m, new_beta, self.beta)

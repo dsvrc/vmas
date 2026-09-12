@@ -63,42 +63,33 @@ ns_direct: false             # THE (B) CONTROL. true moves this instance from
 pact_enabled: false          # the arm switch
 pact_trust: 0.9              # P-5.1's INVERTED prior: near full reliance, not
                              # half
-pact_mu: 0.97                # the tracking dial (P-4.3): declared, SWEPT, and
+pact_mu: 0.95                # the tracking dial (P-4.3): declared, SWEPT, and
                              # not inherited.  URB's 0.999 has an effective
                              # memory of 1/(1-mu) = 1000 steps, but this driver
                              # cycles every 100, so at 0.999 the estimator
                              # averages the drift away instead of tracking it.
                              #
-                             # Swept on transport at sigma=2, correction bounded.
-                             # Blind is 50.3% of B0.  TWO excitation regimes,
-                             # because they disagree and only one of them is
-                             # what early training looks like:
+                             # Swept on transport at sigma=2, 3 seeds, WITH the
+                             # covariance windup bound (pact_p_trace_max).
+                             # Blind is 50.3% of B0:
                              #
-                             #   mu     mem   %B0   err(heuristic)  err(random)
-                             #  0.999  1000  74.7%     0.640          0.0282
-                             #  0.99    100  76.9%     0.611          0.0267
-                             #  0.98     50  79.6%     0.592          0.0248
-                             #  0.97     33  80.9%     0.576          0.0231  <-
-                             #  0.95     20  82.2%     0.517          DIVERGED
-                             #  0.90     10  81.2%     9.5e33         DIVERGED
+                             #   mu     memory   %B0    pred err   diverged
+                             #   0.999    1000   73.2%    0.631        0
+                             #   0.99      100   77.9%    0.622        0
+                             #   0.97       33   79.9%    0.578        0
+                             #   0.95       20   82.1%    0.544        0   <- here
+                             #   0.90       10   80.0%    0.525        0
                              #
-                             # 0.95 scores best under the heuristic and BLOWS UP
-                             # under a random action stream, where the channels
-                             # are small and the covariance inflates.  Early RL
-                             # training is near-random, so 0.95 would have died
-                             # in the first iterations of every run.  0.97 is the
-                             # best value stable in BOTH regimes.
+                             # 0.95 is best on BOTH return and prediction error.
+                             # Before the windup bound existed, every mu <= 0.95
+                             # diverged and a real 3M-frame run logged 5.7M
+                             # non-finite predictions out of 12M agent-steps --
+                             # which is why 0.97 was the previous default.  The
+                             # bound removed the stability constraint, so mu is
+                             # now only the bias/variance choice P-4.3 says it is.
                              #
-                             # SELECTED ON PREDICTION ERROR, never on return: at
-                             # mu=0.9 the estimate is meaningless (1e33) and the
-                             # return still looks fine, because a bounded but
-                             # arbitrary correction is a perturbation this
-                             # heuristic tolerates.  See pact_corr_clip.
-                             #
-                             # The proper fix for the instability is a covariance
-                             # bound in the RLS, which is not implemented -- so
-                             # mu is a stability constraint here, not only a
-                             # bias/variance choice.  Say so in the ablation.
+                             # Watch pact/n_bounded: a rising count means mu is
+                             # aggressive for the excitation this policy gives.
 pact_p0: 10.0
 pact_warmup: 200             # steps before any reliance is applied
 pact_channels: full          # "intercept" deletes ONLY the peer channels and
@@ -106,6 +97,22 @@ pact_channels: full          # "intercept" deletes ONLY the peer channels and
                              # adaptive bias. On (B) it should lose nothing; on
                              # (C) it should lose most of the recovery. That
                              # pair is what the classification rests on.
+pact_p_trace_max: 100.0      # bound on covariance windup, as a multiple of the
+                             # initial trace p0*dim.  Declared, not tuned.
+                             #
+                             # RLS with forgetting divides P by mu every step, so
+                             # a direction the policy stops exciting grows
+                             # without bound until the prediction overflows.
+                             # P-4.2's dead-row skip cannot catch it: it only
+                             # sees an EXACTLY zero regressor, and a poorly
+                             # excited one is not zero.
+                             #
+                             # Measured on a real 3M-frame run before this
+                             # existed: 5.7M non-finite predictions out of ~12M
+                             # agent-steps, fit_gain NaN from iteration 4, and an
+                             # applied correction worth 4% of the disturbance.
+                             # PACT was not beaten by the baseline -- it never ran.
+                             # Set 0 to disable and reproduce that.
 pact_corr_clip: 0.5          # guard rail, declared: |correction| <= 0.5 of the
                              # agent's own action range.  NOT a tuning knob.
                              # Without it a DIVERGED estimator (prediction error
