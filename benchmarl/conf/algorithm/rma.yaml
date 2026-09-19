@@ -1,0 +1,71 @@
+defaults:
+  - rma_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# RMA / UP-OSI adaptation module (BASELINES.md B8) -- meta-RL / online system
+# identification.
+#
+#   RMA:    Kumar et al., RSS 2021 (antonilo/rl_locomotion)
+#   UP-OSI: Yu et al., RSS 2017 (VincentYu68/policy_transfer)
+#
+# REQUIRES both of:
+#     task.ns_observe_driver=true        the privileged context A(t)
+#     task.ns_observe_prev_action=true   so the history window is (state, action)
+#
+# The teacher sees A(t); the student never does -- the context columns are
+# dropped from the policy's own input and from every frame of the history
+# window, by construction rather than by configuration.
+#
+# See baselines/docs/rma_osi.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited MAPPO plumbing ---------------------------------------------
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- where the privileged context lives ------------------------------------
+context_start: -3            # simple_ns appends its extra observation columns
+                             # in this order:
+                             #     [... stock obs ..., residual, driver,
+                             #      prev_action_0 ... prev_action_{D-1}]
+                             # so with ns_observe_prev_action on and a D-dim
+                             # action the driver sits at -(D + 1).  D = 2 on
+                             # every simple_ns host, hence -3.
+                             # CHECK THIS FOR A NEW HOST: the algorithm prints
+                             # the slice it resolved at construction, and
+                             # raises rather than silently conditioning the
+                             # teacher on the wrong column.
+context_size: 1              # A(t) is a scalar.
+
+# --- the adaptation module -------------------------------------------------
+history_len: 50              # RMA's adaptation module reads the last 50
+                             # state-action pairs.
+latent_dim: 8                # RMA's z. The paper uses 8.
+encoder_hidden: 128          # width of mu and phi.
+predict_latent: True         # True  -> RMA: the policy consumes a learned
+                             #          latent z = mu(e) and phi regresses onto
+                             #          z.
+                             # False -> UP-OSI: the policy consumes the model
+                             #          parameters themselves and the
+                             #          identifier regresses onto them.
+                             # Both are cited by BASELINES.md B8; run both if
+                             # you want the pair.
+
+phase1_frames: 1000000       # Frames of privileged (teacher) training before
+                             # the adaptation module takes over the policy's
+                             # input and the base policy is frozen. RMA trains
+                             # phase 1 to convergence first; with a 3M-frame
+                             # budget, a third is the natural split. Watch
+                             # rma_adapt_mse: if it is still falling steeply at
+                             # the switch, phase 1 was too short.
+adapt_coef: 1.0              # multiplier on ||zhat - z||^2. It has its own
+                             # optimiser, so this only rescales its learning
+                             # rate.

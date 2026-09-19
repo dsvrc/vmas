@@ -1,0 +1,67 @@
+defaults:
+  - hasac_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# HASAC (BASELINES.md B1, off-policy) -- maximum-entropy heterogeneous-agent
+# soft actor-critic.
+#
+#   Liu et al., ICLR 2024 (arXiv 2306.10715); reference code PKU-MARL/HARL.
+#
+# Launch with `experiment.share_policy_params=false`: with one shared policy
+# "update agent m, then refresh its action for agent m+1" moves every agent at
+# once and there is no sequential update left to measure.
+#
+# Continuous actions only -- HARL's discrete HASAC swaps the squashed Gaussian
+# for a Gumbel-softmax policy, which is a different actor, not a flag.
+#
+# The shared hyper-parameters are MASAC's, verbatim from
+# conf/algorithm/masac.yaml, so the HASAC-vs-MASAC row isolates the three
+# things HASAC adds. See baselines/docs/hasac.md.
+# ---------------------------------------------------------------------------
+
+share_param_critic: True      # REQUIRED. HASAC's critic is ONE joint soft Q
+                              # over the centralised state and every agent's
+                              # action. The algorithm raises if this is False.
+num_qvalue_nets: 2            # HARL: critic + critic2, min of the two.
+loss_function: "l2"           # HARL: mse unless use_huber_loss.
+delay_qvalue: True            # HARL: target critics, polyak-updated.
+target_entropy: "auto"        # -prod(action_shape), per agent, as HARL's
+                              # `-np.prod(act_space.shape)`.
+discrete_target_entropy_weight: 0.2   # unused (continuous only)
+alpha_init: 1.0
+min_alpha: null
+max_alpha: null
+fixed_alpha: False            # HARL auto_alpha: True
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+coupled_discrete_values: True # unused (continuous only)
+
+# --- HASAC's own knobs -----------------------------------------------------
+
+fixed_order: False            # HARL fixed_order: False -- a fresh random
+                              # permutation of the agents at the start of every
+                              # sweep.
+
+calls_per_agent: 1            # One optimiser call per agent per sweep, so a
+                              # full sweep takes n_agents calls. The critic is
+                              # updated on every call, which makes the effective
+                              # HARL `policy_freq` equal to n_agents. To match
+                              # HARL's policy_freq=1 exactly, multiply
+                              # experiment.off_policy_n_optimizer_steps by
+                              # n_agents -- at n_agents times the critic budget.
+                              # See baselines/docs/hasac.md, "budget".
+
+per_agent_alpha: True         # HARL tunes one temperature per agent for the
+                              # actors. False falls back to torchrl's single
+                              # shared alpha, which is MASAC's convention.
+
+joint_entropy_target: True    # HARL's Q target subtracts
+                              #   alpha_c * SUM_i log pi_i(a'_i | o'_i)
+                              # -- the entropy of the JOINT action -- from the
+                              # single joint Q, with alpha_c a separate
+                              # temperature tuned against the summed target
+                              # entropy. This is the "maximum entropy" in
+                              # "maximum entropy heterogeneous-agent".
+                              # False reverts to MASAC's per-agent target and
+                              # exists only to price this term.

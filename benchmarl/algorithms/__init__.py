@@ -6,18 +6,31 @@
 
 from .common import Algorithm, AlgorithmConfig
 from .ensemble import EnsembleAlgorithm, EnsembleAlgorithmConfig
+from .ernie import Ernie, ErnieConfig
+from .happo import Happo, HappoConfig
+from .hasac import Hasac, HasacConfig
 from .iddpg import Iddpg, IddpgConfig
 from .ippo import Ippo, IppoConfig
 from .iql import Iql, IqlConfig
 from .isac import Isac, IsacConfig
+from .lcpo import Lcpo, LcpoConfig
+from .liam import Liam, LiamConfig
 from .maddpg import Maddpg, MaddpgConfig
 from .mappo import Mappo, MappoConfig
 from .mappo_ctde import MappoCtde, MappoCtdeConfig
 from .masac import Masac, MasacConfig
+from .mfac import Mfac, MfacConfig
 from .qmix import Qmix, QmixConfig
+from .rma import Rma, RmaConfig
 from .vdn import Vdn, VdnConfig
 
 classes = [
+    "Ernie",
+    "ErnieConfig",
+    "Happo",
+    "HappoConfig",
+    "Hasac",
+    "HasacConfig",
     "Iddpg",
     "IddpgConfig",
     "Ippo",
@@ -26,6 +39,10 @@ classes = [
     "IqlConfig",
     "Isac",
     "IsacConfig",
+    "Lcpo",
+    "LcpoConfig",
+    "Liam",
+    "LiamConfig",
     "Maddpg",
     "MaddpgConfig",
     "Mappo",
@@ -34,8 +51,12 @@ classes = [
     "MappoCtdeConfig",
     "Masac",
     "MasacConfig",
+    "Mfac",
+    "MfacConfig",
     "Qmix",
     "QmixConfig",
+    "Rma",
+    "RmaConfig",
     "Vdn",
     "VdnConfig",
 ]
@@ -44,6 +65,14 @@ classes = [
 # This is used to aid loading of algorithms from yaml
 algorithm_config_registry = {
     "mappo": MappoConfig,
+    # ---- BASELINES.md baselines; see baselines/README.md -------------
+    "happo": HappoConfig,      # B1  trust region / sequential update
+    "hasac": HasacConfig,      # B1  off-policy, maximum entropy
+    "ernie": ErnieConfig,      # B9  robust MARL, adversarial regulariser
+    "lcpo": LcpoConfig,        # B6  non-stationary RL, observed context
+    "liam": LiamConfig,        # B5  agent modelling
+    "mfac": MfacConfig,        # B4  mean-field MARL
+    "rma": RmaConfig,          # B8  meta-RL / online system identification
     "mappo_ctde": MappoCtdeConfig,
     "ippo": IppoConfig,
     "maddpg": MaddpgConfig,

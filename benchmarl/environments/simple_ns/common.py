@@ -78,6 +78,18 @@ class SimpleNsClass(VmasClass):
     def pact_enabled(self) -> bool:
         return bool(self.config.get("pact_enabled", False))
 
+    @property
+    def ns_baseline(self) -> str:
+        """Which BASELINES.md B10 compensator arm, if any: eso / rls_raw / none."""
+        return str(self.config.get("ns_baseline", "none") or "none")
+
+    @property
+    def arm_name(self) -> str:
+        """The arm, for the debug CSV and the run folder."""
+        if self.ns_baseline != "none":
+            return self.ns_baseline
+        return "pact" if self.pact_enabled else "blind"
+
     def get_env_fun(
         self,
         num_envs: int,
@@ -89,12 +101,13 @@ class SimpleNsClass(VmasClass):
 
         config = self._scenario_kwargs()
         pact = self.pact_enabled
+        baseline = self.ns_baseline
         host = self.host
         return lambda: VmasEnv(
             # a scenario INSTANCE: nothing is copied into the installed vmas, so
             # a vmas upgrade cannot silently revert the non-stationarity, and the
             # stock scenario and this one coexist in one process
-            scenario=make_scenario(pact, host=host),
+            scenario=make_scenario(pact, host=host, baseline=baseline),
             num_envs=num_envs,
             continuous_actions=continuous_actions,
             seed=seed,
@@ -221,7 +234,7 @@ class SimpleNsClass(VmasClass):
             record = {
                 "iteration": self._debug_n,
                 "wall_time": round(time.time() - getattr(self, "_debug_t0", time.time()), 2),
-                "arm": "pact" if self.pact_enabled else "blind",
+                "arm": self.arm_name,
                 "sigma": self.config.get("ns_severity"),
                 "direct": self.config.get("ns_direct"),
                 "channels": self.config.get("pact_channels"),

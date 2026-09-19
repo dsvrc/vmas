@@ -1,0 +1,47 @@
+defaults:
+  - mfac_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# MF-AC (BASELINES.md B4) -- mean-field multi-agent RL.
+#
+#   Yang et al., ICML 2018.  Code: mlii/mfrl, deligentfool/mfrl_pytorch.
+#
+# REQUIRES `task.ns_observe_prev_action=true`: the mean action is read off the
+# observation, which is where each agent's own last action lives.
+#
+# NOTE what BASELINES.md B4 actually decides: do NOT port, because the
+# information-matched blind arm (the channels -- the WEIGHTED mean neighbour
+# action -- in the observation) already is a mean-field-style policy here. That
+# argument stands. This arm is the published method itself, so the paper can
+# report both and say which is which:
+#   * information-matched blind : weighted mean in the POLICY's input
+#   * MF-AC                     : unweighted mean in the CRITIC's input
+#
+# See baselines/docs/mfac.md.
+# ---------------------------------------------------------------------------
+
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- the mean action -------------------------------------------------------
+prev_action_start: 0      # 0 means "the last `prev_action_size` components",
+                          # which is where ns_observe_prev_action puts them.
+                          # A negative value counts from the end; a positive one
+                          # is an absolute index.
+prev_action_size: 0       # 0 means "the action dimension", read from the action
+                          # spec.
+include_self: False       # False is the PAPER's abar^j, a mean over N(j) that
+                          # excludes j -- and the only version that respects the
+                          # j != i structure this whole instance is built on.
+                          # True is the reference IMPLEMENTATION's
+                          # `former_act_prob`, a mean over the whole team, self
+                          # included, tiled to every agent. Run both if a
+                          # reviewer asks which one the claim depends on.

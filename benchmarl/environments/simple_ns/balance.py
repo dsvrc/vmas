@@ -35,3 +35,14 @@ class TaskConfig:
     pact_oracle: bool = MISSING
     pact_corr_clip: float = MISSING
     pact_p_trace_max: float = MISSING
+
+    # --- BASELINES.md additions (see baselines/README.md) -------------------
+    # Every one of these is OFF by default, so an existing arm is bit-identical.
+    ns_observe_driver: bool = MISSING
+    ns_observe_prev_action: bool = MISSING
+    ns_dr_enabled: bool = MISSING
+    ns_dr_low: float = MISSING
+    ns_dr_high: float = MISSING
+    ns_baseline: str = MISSING
+    eso_bandwidth: float = MISSING
+    rls_raw_use_operator: bool = MISSING

@@ -41,7 +41,13 @@ from pact1.core import PactParams, RLS, compensate, confidence
 from simple_ns.coupling import Coupling
 from simple_ns.driver import DialParams, beta_star, driver_A
 
-__all__ = ["ExertionMixin", "PactMixin", "NS_KWARGS", "PACT_KWARGS"]
+__all__ = [
+    "ExertionMixin",
+    "PactMixin",
+    "NS_KWARGS",
+    "PACT_KWARGS",
+    "BASELINE_KWARGS",
+]
 
 
 NS_KWARGS = (
@@ -59,6 +65,22 @@ NS_KWARGS = (
     "ns_y_clip",
     "ns_observe_residual",
     "ns_direct",
+    #  ---- added for the BASELINES.md baselines; see baselines/README.md ----
+    "ns_observe_driver",   # B6/B8/D.4: publish the driver A(t) to the agent
+    "ns_observe_prev_action",  # B8: the agent's own last action, for RMA/UP-OSI
+    "ns_dr_enabled",       # B9: domain randomisation over sigma
+    "ns_dr_low",
+    "ns_dr_high",
+    "ns_baseline",         # B10: which non-learning compensator arm, if any
+)
+
+#: BASELINES.md B10.  Read only by `simple_ns/baselines.py`; declared here so
+#: that `ExertionMixin.make_world` pops them on EVERY arm -- an unconsumed
+#: scenario kwarg is a silent no-op, which is exactly how a knob that does
+#: nothing gets reported as a setting that works.
+BASELINE_KWARGS = (
+    "eso_bandwidth",
+    "rls_raw_use_operator",
 )
 
 PACT_KWARGS = (
@@ -92,6 +114,13 @@ class ExertionMixin:
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         raw = _pop(kwargs, NS_KWARGS)
         self._pact_raw = _pop(kwargs, PACT_KWARGS)
+        self._baseline_raw = _pop(kwargs, BASELINE_KWARGS)
+        self._baseline = str(raw.get("ns_baseline", "none"))
+        if self._baseline not in ("none", "eso", "rls_raw"):
+            raise ValueError(
+                f"ns_baseline must be one of 'none', 'eso', 'rls_raw'; got "
+                f"{self._baseline!r}"
+            )
 
         self.ns = DialParams(
             severity=float(raw.get("ns_severity", 1.0)),
@@ -108,6 +137,46 @@ class ExertionMixin:
             y_clip=float(raw.get("ns_y_clip", 10.0)),
         )
         self._observe_residual = bool(raw.get("ns_observe_residual", True))
+        #  BASELINES.md D.4 / B6 / B8.  The driver is a function of observable
+        #  time and no agent influences it, so handing it over is an information
+        #  grant, not a leak of anyone's private state.  It is what the
+        #  "oracle-driver blind" arm gets, and it is the CONTEXT that LCPO (B6)
+        #  and the RMA/UP-OSI adaptation module (B8) are defined to condition on.
+        #  Off by default, so every existing arm is bit-identical.
+        self._observe_driver = bool(raw.get("ns_observe_driver", False))
+        #  BASELINES.md B8.  RMA and UP-OSI both identify the environment from a
+        #  window of (state, action) pairs, so the action stream has to be in
+        #  the observation for a history encoder to see it.  This is the agent's
+        #  OWN executed action -- the same proprioception the residual sensor
+        #  already uses (the jack measures the force it delivered) -- and it is
+        #  one step stale for the same reason.  Off by default.
+        self._observe_prev_action = bool(raw.get("ns_observe_prev_action", False))
+        #  BASELINES.md B9's must-run robust baseline: resample sigma per
+        #  episode from [low, high] and train the stock learner on the mixture.
+        self._dr_enabled = bool(raw.get("ns_dr_enabled", False))
+        self._dr_low = float(raw.get("ns_dr_low", 0.0))
+        self._dr_high = float(raw.get("ns_dr_high", 3.0))
+        if self._dr_enabled:
+            if not (0.0 <= self._dr_low <= self._dr_high):
+                raise ValueError(
+                    f"ns_dr_low={self._dr_low} ns_dr_high={self._dr_high}: the "
+                    "randomisation range must satisfy 0 <= low <= high."
+                )
+            #  beta* is LINEAR in sigma, so drawing sigma per episode is exactly
+            #  "compute the disturbance at sigma=1 and scale it".  Setting the
+            #  nominal to 1 here means the draw multiplies in with no division
+            #  and no special case, and it makes the override impossible to
+            #  miss in the log.
+            print(
+                f"[simple_ns] DOMAIN RANDOMISATION over sigma is ON: "
+                f"sigma ~ U[{self._dr_low}, {self._dr_high}] redrawn per "
+                f"episode per parallel world. ns_severity="
+                f"{self.ns.severity} from the task config is IGNORED for the "
+                "disturbance magnitude (it is now the draw). Evaluate this arm "
+                "at the committed sigma in a separate run -- see "
+                "baselines/docs/dr_sigma.md."
+            )
+            self.ns.severity = 1.0
         # The (B) CONTROL.  See _disturbance for what it changes and why the
         # comparison between it and the default is the paper's central pair.
         self._direct = bool(raw.get("ns_direct", False))
@@ -162,6 +231,12 @@ class ExertionMixin:
         self._y_prev = torch.zeros(B, N, **f)
         self._A = torch.zeros(B, **f)
         self._clipped = torch.zeros(B, N, **f)
+        #  Per-world severity.  Exactly 1.0 everywhere unless ns_dr_enabled, in
+        #  which case _draw_sigma fills it; `_scale_severity` is a no-op when DR
+        #  is off, so every existing arm stays bit-identical.
+        self._sigma = torch.ones(B, **f)
+        if self._dr_enabled:
+            self._draw_sigma(None)
 
         # NS-3.3: count what the layer actually touched, as tensors so there is
         # no device sync on the per-step path.
@@ -224,8 +299,34 @@ class ExertionMixin:
                 t[env_index] = 0.0
         # NS-3.4: the driver's clock is NOT reset.  The bearing does not un-wear
         # and the afternoon does not un-warm because an episode ended.
+        if self._dr_enabled:
+            #  BASELINES.md B9: a NEW severity per EPISODE.  Redrawn here and
+            #  nowhere else, so it is constant within an episode -- which is
+            #  what "train over a distribution of sigma" means; redrawing per
+            #  step would be a different (and much weaker) disturbance.
+            self._draw_sigma(env_index)
         self._on_reset(env_index)
         return out
+
+    def _draw_sigma(self, env_index: Optional[int]) -> None:
+        lo, hi = self._dr_low, self._dr_high
+        if env_index is None:
+            self._sigma.uniform_(lo, hi)
+        else:
+            self._sigma[env_index] = (
+                torch.rand((), device=self._sigma.device) * (hi - lo) + lo
+            )
+
+    def _scale_severity(self, load: Tensor) -> Tensor:
+        """Apply the per-world severity draw.  Identity unless DR is on.
+
+        Skipped entirely -- not multiplied by 1.0 -- when DR is off, so the
+        sigma=0 identity and the blind/pact bit-for-bit comparison are
+        untouched by the presence of this hook.
+        """
+        if not self._dr_enabled:
+            return load
+        return load * self._sigma.reshape(-1, 1)
 
     def _on_reset(self, env_index: Optional[int]) -> None:
         return
@@ -256,6 +357,7 @@ class ExertionMixin:
         # normalised to the declared reference so sigma means the same physical
         # severity in every host (see Coupling.load_norm)
         self._load = (beta.unsqueeze(1) * x).sum(-1) / self._load_norm
+        self._load = self._scale_severity(self._load)
         if self.ns.channel != "droop":
             # the shove channel is a force, so it is scaled to the action range;
             # droop is already a FRACTION of delivered force and must not be
@@ -268,7 +370,9 @@ class ExertionMixin:
             #  everyone, from the driver alone, with no sum over j != i.  A lone
             #  jack then feels it, which is exactly what makes this cell (B).
             mag = self.ns.severity * self.ns.loss_at_sigma1 * a.reshape(-1, 1)
-            self._load = mag.expand_as(self._load).clamp(0.0, self.ns.droop_max)
+            self._load = self._scale_severity(
+                mag.expand_as(self._load)
+            ).clamp(0.0, self.ns.droop_max)
         elif self._direct:
             #  THE (B) CONTROL -- exogenous, not interaction-mediated.
             #
@@ -304,7 +408,9 @@ class ExertionMixin:
                 nrm > 1e-12, u_cmd / nrm.clamp_min(1e-12), torch.zeros_like(u_cmd)
             )
             mag = self.ns.severity * self.ns.loss_at_sigma1 * a.reshape(-1, 1)
-            self._load = mag * self._u_range[:, 0].reshape(1, -1)
+            self._load = self._scale_severity(
+                mag.expand_as(self._load)
+            ) * self._u_range[:, 0].reshape(1, -1)
             self._d = -direction * self._load.unsqueeze(-1)
             # the sensor still measures what it measures
             self._ehat = -direction[..., :2]
@@ -420,16 +526,38 @@ class ExertionMixin:
 
     def observation(self, agent: Agent):
         obs = super().observation(agent)
-        if not self._observe_residual:
+        extra = []
+        if self._observe_residual:
+            i = self._agent_index[agent.name]
+            # ONE STEP STALE, and clipped to a declared bound (P-2.1).
+            extra.append(
+                ("residual", self._y_prev[:, i : i + 1].clamp(-1.0, self.ns.y_clip))
+            )
+        if self._observe_driver:
+            #  BASELINES.md D.4's "oracle-driver" grant, and the observed CONTEXT
+            #  that B6 (LCPO) and B8 (RMA / UP-OSI) are defined to condition on.
+            #
+            #  A(t) only.  NOT sigma, NOT beta*, NOT the peers' draw: the driver
+            #  is a function of observable time that no agent influences, so
+            #  publishing it is a grant of public information.  Knowing the
+            #  weather is not knowing the neighbours' load under it, and keeping
+            #  that line sharp is the whole point of the arm.
+            extra.append(("driver", self._A.reshape(-1, 1)))
+        if self._observe_prev_action:
+            i = self._agent_index[agent.name]
+            #  Dimensionless: divided by the agent's own action range, so the
+            #  column is O(1) whatever the host's action box is.
+            extra.append(
+                ("prev_action", self._u_prev[:, i] / self._u_range[i].reshape(1, -1))
+            )
+        if not extra:
             return obs
-        i = self._agent_index[agent.name]
-        # ONE STEP STALE, and clipped to a declared bound (P-2.1).
-        y = self._y_prev[:, i : i + 1].clamp(-1.0, self.ns.y_clip)
         if isinstance(obs, dict):
             obs = dict(obs)
-            obs["residual"] = y
+            for name, value in extra:
+                obs[name] = value
             return obs
-        return torch.cat([obs, y], dim=-1)
+        return torch.cat([obs] + [value for _, value in extra], dim=-1)
 
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         try:
@@ -445,6 +573,11 @@ class ExertionMixin:
                 "ns_y": self._y[:, i : i + 1],
                 "ns_clipped": self._clipped[:, i : i + 1],
                 "ns_x_std": self._x[:, i].std(dim=-1, keepdim=True),
+                #  Constant 1.0 unless ns_dr_enabled; under B9's domain
+                #  randomisation it is the per-episode draw, which is what makes
+                #  "what severity was this trajectory actually at" answerable
+                #  from the logs rather than from the config.
+                "ns_sigma": self._sigma.unsqueeze(-1),
             }
         )
         return info

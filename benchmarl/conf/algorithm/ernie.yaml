@@ -1,0 +1,52 @@
+defaults:
+  - ernie_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# ERNIE (BASELINES.md B9) -- robust MARL by adversarial regularization.
+#
+#   Bukharin et al., NeurIPS 2023 (arXiv 2310.10810).
+#   Reference code: abukharin3/ERNIE.
+#
+# MAPPO plus one extra term on the policy loss.  Everything else is MAPPO's, so
+# the ERNIE-vs-MAPPO row prices the regularizer alone.
+#
+# The paper's Stackelberg / leader-follower stabiliser is NOT implemented --
+# see baselines/docs/ernie.md for what it would cost here and why the published
+# regularizer is the part BASELINES.md asks for.
+# ---------------------------------------------------------------------------
+
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- ERNIE's own knobs -----------------------------------------------------
+# Values are the repo's own (Algorithms/configs/config_coma.py), except `lam`,
+# which that config does not set for the non-Stackelberg branch.
+
+lam: 0.1                 # weight on the regularizer: loss + lam * ||f(s)-f(s~)||.
+                         # NOTE the published norm is a Frobenius norm over the
+                         # WHOLE minibatch, not a mean, so the effective weight
+                         # scales with sqrt(minibatch size). Reproduced as
+                         # published; if you change
+                         # experiment.on_policy_minibatch_size, rescale lam by
+                         # sqrt of the ratio or the regularizer silently changes
+                         # strength.
+
+perturb_alpha: 0.1       # config.alg.perturb_alpha = 1e-1
+perturb_num_steps: 1     # config.alg.perturb_num_steps = 1
+perturb_radius: 1.0      # config.alg.perturb_radius = 1. Elementwise clamp on
+                         # the ascent gradient (the projection onto the ball in
+                         # Algorithms/coma.py). 0 disables it, which is the
+                         # README's version of the algorithm.
+perturb_init_std: 0.001  # ERNIE seeds every perturbation with N(0, 1e-3).
+scale_by_obs: True       # README: the step is `perturb_alpha * grad *
+                         # torch.abs(obs.detach())`, i.e. relative to the
+                         # magnitude of each observation component. False gives
+                         # the plain FGSM step used in the coma.py branch.

@@ -30,9 +30,10 @@ from vmas.scenarios.navigation import Scenario as NavigationScenario
 from vmas.scenarios.sampling import Scenario as SamplingScenario
 from vmas.scenarios.transport import Scenario as TransportScenario
 
+from simple_ns.baselines import EsoMixin, RlsRawMixin
 from simple_ns.layer import ExertionMixin, PactMixin
 
-__all__ = ["HOSTS", "make_scenario"]
+__all__ = ["HOSTS", "ARMS", "make_scenario"]
 
 
 # -- balance: three supports under one rotatable beam carrying a package. The
@@ -46,6 +47,14 @@ class BalancePact(PactMixin, BalanceScenario):
     pass
 
 
+class BalanceEso(EsoMixin, BalanceScenario):
+    pass
+
+
+class BalanceRlsRaw(RlsRawMixin, BalanceScenario):
+    pass
+
+
 # -- transport: agents push a heavy package to a goal. Same medium, same story,
 #    and the package mass makes the transmission strong.
 class TransportNs(ExertionMixin, TransportScenario):
@@ -53,6 +62,14 @@ class TransportNs(ExertionMixin, TransportScenario):
 
 
 class TransportPact(PactMixin, TransportScenario):
+    pass
+
+
+class TransportEso(EsoMixin, TransportScenario):
+    pass
+
+
+class TransportRlsRaw(RlsRawMixin, TransportScenario):
     pass
 
 
@@ -66,6 +83,14 @@ class SamplingPact(PactMixin, SamplingScenario):
     pass
 
 
+class SamplingEso(EsoMixin, SamplingScenario):
+    pass
+
+
+class SamplingRlsRaw(RlsRawMixin, SamplingScenario):
+    pass
+
+
 # -- navigation: point-to-point with collision avoidance. Same wake story, and it
 #    is the cheapest host, so it is the one to debug on.
 class NavigationNs(ExertionMixin, NavigationScenario):
@@ -76,6 +101,14 @@ class NavigationPact(PactMixin, NavigationScenario):
     pass
 
 
+class NavigationEso(EsoMixin, NavigationScenario):
+    pass
+
+
+class NavigationRlsRaw(RlsRawMixin, NavigationScenario):
+    pass
+
+
 HOSTS = {
     "balance": (BalanceNs, BalancePact),
     "transport": (TransportNs, TransportPact),
@@ -83,10 +116,40 @@ HOSTS = {
     "navigation": (NavigationNs, NavigationPact),
 }
 
+#  BASELINES.md B10 -- the non-learning compensators, as arms of the same
+#  environment rather than as wrappers around it.  Selected by the task key
+#  `ns_baseline`; see simple_ns/baselines.py and baselines/docs/eso_dob.md.
+ARMS = {
+    "balance": {"eso": BalanceEso, "rls_raw": BalanceRlsRaw},
+    "transport": {"eso": TransportEso, "rls_raw": TransportRlsRaw},
+    "sampling": {"eso": SamplingEso, "rls_raw": SamplingRlsRaw},
+    "navigation": {"eso": NavigationEso, "rls_raw": NavigationRlsRaw},
+}
 
-def make_scenario(pact: bool, host: str):
-    """Build a scenario instance: stock host + dial (+ compensator)."""
+
+def make_scenario(pact: bool, host: str, baseline: str = "none"):
+    """Build a scenario instance: stock host + dial (+ a compensator).
+
+    Exactly one compensator: ``pact_enabled`` selects PACT, ``ns_baseline``
+    selects one of B10's arms, and asking for both is an error rather than a
+    silent double feed-forward.
+    """
     if host not in HOSTS:
         raise ValueError(f"unknown host {host!r}; expected one of {sorted(HOSTS)}")
+    baseline = str(baseline or "none")
+    if baseline != "none":
+        if pact:
+            raise ValueError(
+                f"pact_enabled=true together with ns_baseline={baseline!r}. "
+                "These are alternative compensators for the same channel; run "
+                "one at a time."
+            )
+        arms = ARMS[host]
+        if baseline not in arms:
+            raise ValueError(
+                f"unknown ns_baseline {baseline!r}; expected 'none' or one of "
+                f"{sorted(arms)}"
+            )
+        return arms[baseline]()
     plain, with_pact = HOSTS[host]
     return with_pact() if pact else plain()

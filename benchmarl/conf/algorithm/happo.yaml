@@ -1,0 +1,65 @@
+defaults:
+  - happo_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# HAPPO (BASELINES.md B1) -- trust-region / monotonic-improvement MARL.
+#
+#   Kuba et al., ICLR 2022 (arXiv 2109.11251); HARL, JMLR 2024
+#   (arXiv 2304.09870).  Reference code: PKU-MARL/HARL.
+#
+# REQUIRES `experiment.share_policy_params=false` -- the algorithm raises if it
+# is not set.  See baselines/docs/happo.md.
+#
+# The shared hyper-parameters below are MAPPO's, verbatim from
+# conf/algorithm/mappo.yaml, NOT HARL's defaults.  That is deliberate: the row
+# this baseline exists to produce is "does the sequential trust-region update
+# change the asymptote under the severity dial", and it only answers that if
+# everything except the sequential update is held at the MAPPO values.  HARL's
+# own defaults are recorded next to each key so the alternative run is one
+# override away.
+# ---------------------------------------------------------------------------
+
+share_param_critic: True      # HARL: one shared V critic on the centralised
+                              # state, so this matches.
+clip_epsilon: 0.2             # HARL clip_param: 0.2 -- same.
+entropy_coef: 0.0             # HARL entropy_coef: 0.01.  Held at MAPPO's 0.0.
+critic_coef: 1.0
+loss_critic_type: "l2"        # HARL uses (huber_delta) huber or mse; l2 == mse.
+lmbda: 0.9                    # HARL gae_lambda: 0.95.  Held at MAPPO's 0.9.
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- HAPPO's own knobs -----------------------------------------------------
+
+fixed_order: False            # HARL fixed_order: False.  A fresh random
+                              # permutation of the agents every iteration.  The
+                              # monotone-improvement bound is stated for a
+                              # random order; a fixed order makes agent 0 always
+                              # move first and is only a debugging aid.
+
+standardize_advantage: True   # HARL standardises the advantage ONCE over the
+                              # whole collected batch before the agent blocks
+                              # (`advantages = (adv - nanmean)/(nanstd + 1e-5)`).
+                              # This is HAPPO's own normalisation and is applied
+                              # in Happo.process_batch; torchrl's per-minibatch
+                              # `normalize_advantage` stays off.
+
+factor_clip: 0.0              # NOT in HAPPO.  0.0 reproduces HARL exactly.
+                              # A value c > 1 clamps the factor to [1/c, c].
+                              # The factor is a product of N importance ratios
+                              # and can overflow to inf, which puts a NaN in the
+                              # objective and ends the run; this is the declared
+                              # escape hatch, off by default so the default run
+                              # is the published algorithm.
+
+freeze_non_updating_agents: True
+                              # Not a hyper-parameter -- an exactness guard.
+                              # torchrl stores the non-shared agent policies as
+                              # one stacked tensor, so Adam keeps nudging the
+                              # agents outside the current block from leftover
+                              # momentum even though their gradient is exactly
+                              # zero.  True holds them still, which is what
+                              # "one agent at a time" means.  Set False only to
+                              # measure what the guard is worth.

@@ -138,3 +138,68 @@ pact_oracle: false           # true replaces the estimate with the TRUE
                              # disturbance: the free-answer controller, i.e. the
                              # CEILING. Where it fails, sigma is past sigma* and
                              # the row is about the environment, not the method.
+
+# ---------------------------------------------------------------------------
+# BASELINES.md additions.  All OFF by default: with these values the task is
+# bit-identical to the one the PACT rows were run on.  See baselines/README.md.
+# ---------------------------------------------------------------------------
+
+ns_observe_driver: false     # D.4 / B6 / B8.  true appends the driver A(t) to
+                             # every agent's observation.  A(t) is a function of
+                             # observable time that no agent influences, so this
+                             # is a grant of PUBLIC information -- not sigma, not
+                             # beta*, not the peers' draw.  Required by
+                             # algorithm=lcpo and algorithm=rma, and it is the
+                             # "oracle-driver blind" arm when used with a stock
+                             # learner.
+
+ns_observe_prev_action: false
+                             # B8.  true appends the agent's OWN executed action
+                             # from the previous step (divided by its action
+                             # range) to its observation.  RMA and UP-OSI both
+                             # identify the environment from a window of
+                             # (state, action) pairs, so a history encoder needs
+                             # the action stream.  Proprioception, not privilege:
+                             # the jack already measures the force it delivered,
+                             # which is what the residual column reports.
+                             # Required by algorithm=rma.
+
+ns_dr_enabled: false         # B9's must-run robust baseline: domain
+                             # randomisation over sigma.  true redraws
+                             # sigma ~ U[ns_dr_low, ns_dr_high] PER EPISODE per
+                             # parallel world and IGNORES ns_severity for the
+                             # magnitude.  Train with it on; evaluate at the
+                             # committed sigma in a separate run -- see
+                             # baselines/docs/dr_sigma.md.
+ns_dr_low: 0.0
+ns_dr_high: 3.0              # BASELINES.md B9: "resample sigma in [0, 3]".
+
+ns_baseline: none            # B10's non-learning compensators, as ARMS:
+                             #   none     -- no compensator (blind, or PACT if
+                             #               pact_enabled)
+                             #   eso      -- per-agent extended-state observer
+                             #               (linear ADRC).  No peer
+                             #               information, no basis, one gain.
+                             #   rls_raw  -- PACT's own RLS on the raw N-1 peer
+                             #               draws instead of the r declared
+                             #               classes.
+                             # Both share PACT's trust, warm-up and correction
+                             # bound, so a difference is a difference in the
+                             # ESTIMATOR. Setting this together with
+                             # pact_enabled is an error, not a double
+                             # feed-forward.
+
+eso_bandwidth: 0.3           # the ESO's single tuning constant: both observer
+                             # poles at 1 - w on the unit disc, giving
+                             # beta1 = 2w, beta2 = w^2 (the sampled-data ESO of
+                             # Miklosovic, Radke & Gao, ACC 2006, at T=1).  w -> 1 copies the last
+                             # measurement, w -> 0 never moves.
+
+rls_raw_use_operator: false  # false is BASELINES.md's literal wording --
+                             # "regress the residual on the N-1 broadcast
+                             # actions directly".  true additionally weights
+                             # peer j by the declared W_ij, which is public, and
+                             # leaves the class reduction as the only
+                             # difference from PACT.  Report both; the claim
+                             # should not rest on withholding public
+                             # information.

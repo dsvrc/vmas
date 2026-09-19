@@ -1,0 +1,53 @@
+defaults:
+  - liam_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# LIAM (BASELINES.md B5) -- agent modelling under partial observability.
+#
+#   Papoudakis, Christianos, Albrecht, NeurIPS 2021.  Code: uoe-agents/LIAM.
+#
+# REQUIRES `task.ns_observe_prev_action=true`: LIAM's encoder reads the
+# controlled agent's own (observation, last action) stream, so the action has
+# to be in the observation for the stacked window to be that stream.
+#
+# Does NOT need ns_observe_driver -- LIAM infers the other agents, not the
+# context, and giving it the driver would make it a different arm.
+#
+# See baselines/docs/liam.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited IPPO plumbing ----------------------------------------------
+# LIAM's RL half is A2C; BenchMARL ships no A2C, so it runs on IPPO -- the same
+# independent-learner setting with the same independent critic, clipped instead
+# of vanilla. Recorded as an adaptation in the doc, not hidden here.
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.01            # the reference passes an entropy_coef to the A2C
+                              # loss; 0.01 is its usual value and, unlike the
+                              # other on-policy baselines here, LIAM is not
+                              # being compared against MAPPO's 0.0 -- it is
+                              # compared against IPPO. Set to 0.0 if you want
+                              # the strictly matched pair.
+critic_coef: 1.0
+loss_critic_type: "l2"        # the reference: value_loss = (returns - v)^2
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- LIAM's own parts ------------------------------------------------------
+history_len: 25               # how many frames of the agent's own stream the
+                              # LSTM encoder reads. The reference runs its LSTM
+                              # over the WHOLE episode; the environment-side
+                              # window truncates it, and this is the truncation.
+                              # balance episodes are 100 steps, so 25 is a
+                              # quarter of an episode.
+hidden_dim: 128               # `hidden_dim1` in the reference.
+embedding_dim: 10             # the embedding the policy consumes.
+recon_coef: 1.0               # multiplier on `rec_loss1 + rec_loss2`. The
+                              # reference gives the encoder+decoder their own
+                              # learning rate (`lr2`) instead; this has the same
+                              # effect because the pair has its own optimiser.
+mask_done: True               # the reference multiplies both losses by
+                              # `(1 - dones_batch)`.
