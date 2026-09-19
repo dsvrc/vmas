@@ -216,6 +216,58 @@ check(
     else "use _compat.attach_callback: hydra hands Experiment a TUPLE",
 )
 
+#  The torchrl internals the baselines reach into moved between releases, and
+#  the cluster's torchrl is older than setup.py's pin: `_has_critic` does not
+#  exist before 0.8, `_log_weight` / `_get_entropy` grew an `adv_shape` argument
+#  later still.  Every one of them is an AttributeError or TypeError one step
+#  into the first optimizer loop -- after the queue wait, after setup -- so each
+#  is reached through the shim in _compat.py, the one file allowed to name them.
+TORCHRL_PRIVATE = ("_has_critic", "_log_weight", "_get_entropy", "_clip_bounds")
+direct = []
+for _path in sorted(ALGO_DIR.glob("*.py")):
+    if _path.name == "_compat.py":
+        continue
+    for node in ast.walk(ast.parse(_path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Attribute) and node.attr in TORCHRL_PRIVATE:
+            direct.append("{}:{} reads .{}".format(_path.name, node.lineno, node.attr))
+check(
+    "no algorithm reads a torchrl-private loss attribute directly",
+    not direct,
+    "\n       ".join(direct)
+    if direct
+    else "go through _compat: {}".format(", ".join(TORCHRL_PRIVATE)),
+)
+
+#  The constructor side of the same problem.  torchrl renamed `entropy_coef`
+#  to `entropy_coeff` (0.9) and `critic_coef` to `critic_coeff` (0.10), and
+#  PPOLoss.__init__ ends in a **kwargs it never checks, so the spelling the
+#  installed torchrl does not know is silently DROPPED and the loss runs on
+#  torchrl's defaults: entropy 0.01 where every yaml here says 0.0.  The
+#  cluster's torchrl predates both renames; this code was written after them.
+#  _compat.coefficient_kwargs reads the right name off the signature, and it
+#  is the only call allowed to spell either coefficient as a keyword.
+COEF_KEYWORDS = ("entropy_coef", "entropy_coeff", "critic_coef", "critic_coeff")
+literal = []
+for _path in sorted(ALGO_DIR.glob("*.py")):
+    if _path.name == "_compat.py":
+        continue
+    for node in ast.walk(ast.parse(_path.read_text(encoding="utf-8"))):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "coefficient_kwargs":
+            continue
+        for kw in node.keywords:
+            if kw.arg in COEF_KEYWORDS:
+                literal.append("{}:{} passes {}=".format(_path.name, kw.lineno, kw.arg))
+check(
+    "no algorithm passes a PPO coefficient to a loss by name",
+    not literal,
+    "\n       ".join(literal)
+    if literal
+    else "all seven ClipPPOLoss sites go through _compat.coefficient_kwargs",
+)
+
 
 # ===========================================================================
 print("\n== registry and imports ==")

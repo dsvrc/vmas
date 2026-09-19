@@ -40,6 +40,9 @@ from tensordict import TensorDictBase
 from tensordict.nn import TensorDictModule
 from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 
+from benchmarl.algorithms import _compat  # submodule import: safe while
+                                          # benchmarl.algorithms is still
+                                          # being initialised
 from benchmarl.algorithms.common import Algorithm
 from benchmarl.algorithms.mappo import Mappo, MappoConfig
 
@@ -205,8 +208,9 @@ class Ernie(Mappo):
             actor=policy_for_loss,
             critic=self.get_critic(group),
             clip_epsilon=self.clip_epsilon,
-            entropy_coeff=self.entropy_coef,
-            critic_coeff=self.critic_coef,
+            **_compat.coefficient_kwargs(
+                ErnieLoss, entropy_coef=self.entropy_coef, critic_coef=self.critic_coef
+            ),
             loss_critic_type=self.loss_critic_type,
             normalize_advantage=False,
             observation_keys=observation_keys,

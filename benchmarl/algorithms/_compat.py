@@ -3,15 +3,21 @@
 #
 #  Every baseline in `baselines/` reimplements a published objective on top of a
 #  stock torchrl loss, which means calling a handful of methods that torchrl
-#  marks private (`_log_weight`, `_get_entropy`, `_clip_bounds`).  BenchMARL
-#  pins `torchrl>=0.10,<0.12` and those signatures moved inside that window, so
-#  every such call goes through here rather than being spelled out in eight
-#  files.  If a future torchrl breaks one of them, this is the single file that
-#  reports it, by name, instead of eight tracebacks from inside a training run.
+#  marks private (`_log_weight`, `_get_entropy`, `_clip_bounds`, `_has_critic`)
+#  and passing two constructor keywords torchrl has renamed (`entropy_coef` ->
+#  `entropy_coeff`, `critic_coef` -> `critic_coeff`) into a `**kwargs` that
+#  drops whichever spelling it does not know.  BenchMARL pins
+#  `torchrl>=0.10,<0.12`, those names moved inside that window, and the cluster
+#  environment is OLDER than the pin (its torchrl has no `_has_critic`, which
+#  arrived in 0.8), so every such call goes through here rather than being
+#  spelled out in eight files.  If a torchrl on either side breaks one of them,
+#  this is the single file that reports it, by name, instead of eight
+#  tracebacks from inside a training run -- or, worse, no traceback at all.
 
 from __future__ import annotations
 
-from typing import Any, Tuple
+import inspect
+from typing import Any, Dict, Tuple
 
 import torch
 
@@ -56,6 +62,64 @@ def clip_bounds(loss_module):
         torch.tensor(1.0 - eps).log().item(),
         torch.tensor(1.0 + eps).log().item(),
     )
+
+
+def coefficient_kwargs(loss_cls, entropy_coef, critic_coef) -> Dict[str, Any]:
+    """The entropy and critic multipliers, keyed as ``loss_cls`` declares them.
+
+    torchrl renamed ``entropy_coef`` to ``entropy_coeff`` in 0.9 and
+    ``critic_coef`` to ``critic_coeff`` in 0.10, and ``PPOLoss.__init__`` has
+    always ended in a ``**kwargs`` that nothing checks.  So the spelling a
+    given torchrl does not know is not an error: it is dropped on the floor,
+    and the loss runs on torchrl's own defaults -- entropy 0.01 where every
+    yaml in this repo says 0.0.  Nothing in the run says so.  The cluster's
+    torchrl is on the far side of both renames from the one this code was
+    written against, and every PPO-family baseline paid that 0.01 until this
+    existed.
+
+    Each name is read off the ``__init__`` signature of the class being built,
+    walking its bases because the subclasses here all take ``*args, **kwargs``.
+    Either side gets the name it declares; the deprecated alias is never used.
+    """
+    def declared(new, old):
+        for klass in loss_cls.__mro__:
+            init = klass.__dict__.get("__init__")
+            if init is None:
+                continue
+            try:
+                params = inspect.signature(init).parameters
+            except (TypeError, ValueError):
+                continue
+            if new in params:
+                return new
+            if old in params:
+                return old
+        raise TypeError(
+            f"{loss_cls.__name__} declares neither {new!r} nor {old!r} anywhere "
+            "in its bases; this torchrl is not one _compat knows"
+        )
+
+    return {
+        declared("entropy_coeff", "entropy_coef"): entropy_coef,
+        declared("critic_coeff", "critic_coef"): critic_coef,
+    }
+
+
+def has_critic(loss_module) -> bool:
+    """Whether the loss trains a critic: torchrl's ``_has_critic``, everywhere.
+
+    torchrl 0.8 added ``PPOLoss._has_critic``, set in ``__init__`` as
+    ``bool(critic_coef is not None and critic_coef > 0)`` and tested by
+    ``forward``.  0.7 and earlier have no such attribute -- their ``forward``
+    tests ``critic_coef`` itself -- so reading it is an ``AttributeError`` out
+    of ``LossModule.__getattr__`` one step into the first optimizer loop.  Same
+    definition here, computed from ``critic_coef`` when the flag is absent.
+    """
+    flag = getattr(loss_module, "_has_critic", None)
+    if flag is not None:
+        return bool(flag)
+    coef = getattr(loss_module, "critic_coef", None)
+    return bool(coef is not None and coef > 0)
 
 
 def leaf_params(params) -> list:

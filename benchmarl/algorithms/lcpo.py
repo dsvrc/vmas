@@ -47,6 +47,9 @@ from benchmarl.algorithms._baseline_math import (
     get_qu,
     OutOfDistributionSampler,
 )
+from benchmarl.algorithms import _compat  # submodule import: safe while
+                                          # benchmarl.algorithms is still
+                                          # being initialised
 from benchmarl.algorithms.common import Algorithm, AlgorithmConfig
 from benchmarl.algorithms.ippo import Ippo, IppoConfig
 
@@ -573,8 +576,9 @@ class Lcpo(Ippo):
             actor=policy_for_loss,
             critic=self.get_critic(group),
             clip_epsilon=self.clip_epsilon,
-            entropy_coeff=0.0,
-            critic_coeff=self.critic_coef,
+            **_compat.coefficient_kwargs(
+                LcpoLoss, entropy_coef=0.0, critic_coef=self.critic_coef
+            ),
             loss_critic_type=self.loss_critic_type,
             normalize_advantage=False,
             group=group,

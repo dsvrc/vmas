@@ -21,6 +21,9 @@ from torchrl.modules import (
 )
 from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 
+from benchmarl.algorithms import _compat  # submodule import: safe while
+                                          # benchmarl.algorithms is still
+                                          # being initialised
 from benchmarl.algorithms.common import Algorithm, AlgorithmConfig
 from benchmarl.models.common import ModelConfig
 
@@ -83,8 +86,9 @@ class Mappo(Algorithm):
             actor=policy_for_loss,
             critic=self.get_critic(group),
             clip_epsilon=self.clip_epsilon,
-            entropy_coeff=self.entropy_coef,
-            critic_coeff=self.critic_coef,
+            **_compat.coefficient_kwargs(
+                ClipPPOLoss, entropy_coef=self.entropy_coef, critic_coef=self.critic_coef
+            ),
             loss_critic_type=self.loss_critic_type,
             normalize_advantage=False,
         )

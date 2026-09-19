@@ -326,7 +326,7 @@ class HappoLoss(ClipPPOLoss):
             entropy = entropy * agent_mask
             td_out.set("entropy", entropy.detach().mean())
             td_out.set("loss_entropy", -_compat.entropy_coeff(self) * entropy.mean())
-        if self._has_critic:
+        if _compat.has_critic(self):
             critic_out = self.loss_critic(tensordict)
             loss_critic = critic_out[0] if isinstance(critic_out, tuple) else critic_out
             td_out.set("loss_critic", loss_critic.mean())
@@ -435,8 +435,9 @@ class Happo(Mappo):
             actor=policy_for_loss,
             critic=self.get_critic(group),
             clip_epsilon=self.clip_epsilon,
-            entropy_coeff=self.entropy_coef,
-            critic_coeff=self.critic_coef,
+            **_compat.coefficient_kwargs(
+                HappoLoss, entropy_coef=self.entropy_coef, critic_coef=self.critic_coef
+            ),
             loss_critic_type=self.loss_critic_type,
             normalize_advantage=False,
             n_agents=n_agents,
