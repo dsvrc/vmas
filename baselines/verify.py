@@ -189,6 +189,33 @@ check(
     else "the package is half-built at that point; only submodules resolve",
 )
 
+#  `Experiment.callbacks` is whatever it was constructed with, and the two
+#  entry points differ: a direct Experiment(...) gets the [] default, while
+#  load_experiment_from_hydra -- every launcher in this repo -- defaults to
+#  `callbacks=()`.  So `.append` works in a notebook and is an AttributeError
+#  on the cluster.  _compat.attach_callback handles both.
+#  Matched on the AST, not on the text: the helper that exists to prevent this
+#  naturally mentions `.callbacks.append` in its docstring, and a substring
+#  search would flag the fix as the bug.
+appends = []
+for _path in sorted(ALGO_DIR.glob("*.py")):
+    for node in ast.walk(ast.parse(_path.read_text(encoding="utf-8"))):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "append"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "callbacks"
+        ):
+            appends.append("{}:{}".format(_path.name, node.lineno))
+check(
+    "no algorithm calls experiment.callbacks.append",
+    not appends,
+    "\n       ".join(appends)
+    if appends
+    else "use _compat.attach_callback: hydra hands Experiment a TUPLE",
+)
+
 
 # ===========================================================================
 print("\n== registry and imports ==")

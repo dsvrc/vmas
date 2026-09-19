@@ -388,9 +388,9 @@ class Happo(Mappo):
             )
 
         self._happo_losses: Dict[str, HappoLoss] = {}
-        callback = _sequential_freeze_callback(self._happo_losses)
-        callback.experiment = self.experiment
-        self.experiment.callbacks.append(callback)
+        _compat.attach_callback(
+            self.experiment, _sequential_freeze_callback(self._happo_losses)
+        )
 
     # ------------------------------------------------------------------
 

@@ -84,3 +84,22 @@ def callback_base():
     from benchmarl.experiment.callback import Callback
 
     return Callback
+
+
+def attach_callback(experiment, callback) -> None:
+    """Add a callback to a live ``Experiment``, whatever container it holds.
+
+    ``Experiment.__init__`` keeps whatever it was handed, and the two entry
+    points hand it different things: a notebook builds an ``Experiment``
+    directly and gets the ``[]`` default, while ``load_experiment_from_hydra``
+    -- the path every launcher in this repo uses -- defaults to ``callbacks=()``,
+    a TUPLE.  So ``experiment.callbacks.append(...)`` is an ``AttributeError``
+    on the cluster and works fine in a notebook.
+
+    Rebinding the attribute covers both.  ``CallbackNotifier`` only ever
+    iterates the container, so replacing it is safe; the callback's
+    ``experiment`` back-reference is set here because the notifier only does
+    that for the callbacks present at construction.
+    """
+    callback.experiment = experiment
+    experiment.callbacks = list(experiment.callbacks) + [callback]

@@ -351,9 +351,9 @@ class Rma(Mappo):
             )
         self._encoders: Dict[str, RmaEncoder] = {}
         self._rma_losses: Dict[str, RmaLoss] = {}
-        callback = _rma_freeze_callback(self._rma_losses)
-        callback.experiment = self.experiment
-        self.experiment.callbacks.append(callback)
+        _compat.attach_callback(
+            self.experiment, _rma_freeze_callback(self._rma_losses)
+        )
 
     # ------------------------------------------------------------------
 
