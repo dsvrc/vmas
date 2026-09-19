@@ -72,7 +72,14 @@ Reviewer objection → baseline, in BASELINES.md §C's order.
 | D.4 | information grant | **oracle-driver blind** | `task.ns_observe_driver=true` | env flag — [docs](docs/dr_sigma.md) |
 | B11, B12, Tier 3 | — | TPA, DGN, DCG, MAT, … | — | **skipped, with reasons** — [docs](docs/skipped.md) |
 
-Classes for the launcher: `reference b1 b2 b3 b4 b5 b6 b8 b9 b10 grants`.
+Classes for the launcher: `b1 b2 b3 b4 b5 b6 b8 b9 b10 grants`.
+
+There is an eleventh class, `reference` — stock MAPPO blind, PACT and B0 — and
+it is **not** in the default run. Those are the numbers the baseline rows are
+read *against*, and the PACT ladder (`scripts/ns_*.sh`) already produces them;
+re-running them here would spend a queue slot reproducing a number you have.
+`GROUP=reference bash scripts/run_baselines.sh` if you want them under this
+`OUT_ROOT` too. The launcher prints a reminder whenever it leaves them out.
 
 ---
 

@@ -19,7 +19,13 @@
 #  A different OUT_ROOT means the smoke runs do not mark the real ones as
 #  already finished.
 #
-#  Class names: reference b1 b2 b3 b4 b5 b6 b8 b9 b10 grants
+#  Class names: b1 b2 b3 b4 b5 b6 b8 b9 b10 grants
+#
+#  A bare run does the BASELINES.md rows and nothing else.  The stock MAPPO
+#  reference rows -- mappo_blind, mappo_pact, mappo_b0 -- are the class
+#  `reference` and are NOT in the default: the PACT ladder (scripts/ns_*.sh)
+#  already produces them, and the baseline rows are read against those numbers.
+#  `GROUP=reference bash scripts/run_baselines.sh` if you want them here too.
 #  Everything else -- host, severity, seeds, devices, frame budget -- is set in
 #  scripts/baselines_common.sh and overridable from the environment:
 #
@@ -49,7 +55,7 @@ else
   for group in ${GROUP}; do
     var="GROUP_${group}"
     if [ -z "${!var:-}" ]; then
-      echo "unknown class '${group}'; expected one or more of: ${ALL_GROUPS}" >&2
+      echo "unknown class '${group}'; expected one or more of: ${KNOWN_GROUPS}" >&2
       exit 2
     fi
     rows="${rows} ${!var}"
@@ -62,7 +68,13 @@ echo "sigma       ${SIGMA}"
 echo "seeds       ${SEEDS}"
 echo "frames      ${FRAMES}"
 echo "output      ${OUT_ROOT}/${HOST}/sigma${SIGMA}"
-echo "rows       ${rows}"
+echo "rows        ${rows}"
+case " ${rows} " in
+  *" mappo_blind "*) ;;
+  *) echo "reference   NOT re-run (mappo_blind / mappo_pact / mappo_b0)."
+     echo "            Read the baseline rows against the numbers the PACT"
+     echo "            ladder already produced; GROUP=reference to redo them." ;;
+esac
 echo
 
 for row in ${rows}; do

@@ -116,7 +116,14 @@ run_one () {
 #  of the row.  GROUP picks a class, ONLY picks rows by name.
 # ===========================================================================
 
-# --- reference rows, so the baselines have something to be compared with ---
+# --- reference rows -------------------------------------------------------
+#  Stock MAPPO, not baselines: the numbers every baseline row is read against.
+#  NOT in ALL_GROUPS, because the PACT ladder (scripts/ns_*.sh) already runs
+#  them -- re-running them here would burn a queue slot to reproduce a number
+#  you have.  Ask for them explicitly if you want them in this OUT_ROOT:
+#
+#      GROUP=reference bash scripts/run_baselines.sh
+#      ONLY=mappo_b0   bash scripts/run_baselines.sh
 GROUP_reference="mappo_blind mappo_pact mappo_b0"
 
 mappo_b0 () {  # the no-NS reference the percentages are of
@@ -267,4 +274,10 @@ oracle_driver_blind () {
     task.ns_observe_driver=true task.pact_enabled=false
 }
 
-ALL_GROUPS="reference b1 b2 b3 b4 b5 b6 b8 b9 b10 grants"
+#  What a bare `run_baselines.sh` runs: the BASELINES.md rows only.  The stock
+#  MAPPO reference rows are a class of their own and are deliberately absent --
+#  see GROUP_reference above.
+ALL_GROUPS="b1 b2 b3 b4 b5 b6 b8 b9 b10 grants"
+
+#  Every class the launcher will accept, including the ones outside the default.
+KNOWN_GROUPS="reference ${ALL_GROUPS}"
