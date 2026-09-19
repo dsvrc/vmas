@@ -57,8 +57,15 @@ from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 from benchmarl.algorithms._history import with_observation_history
 from benchmarl.algorithms.common import Algorithm
 from benchmarl.algorithms.mappo import Mappo, MappoConfig
-from benchmarl.experiment.callback import Callback
 from benchmarl.models.common import ModelConfig
+
+#  benchmarl.experiment.callback.Callback is NOT imported here: benchmarl's own
+#  __init__ imports benchmarl.algorithms before benchmarl.experiment, and
+#  benchmarl.experiment imports names back out of benchmarl.algorithms, so an
+#  import-time dependency on it here makes `import benchmarl` fail outright.
+#  The base class is fetched at construction instead -- see
+#  `_rma_freeze_callback` below and `_compat.callback_base`.
+from benchmarl.algorithms import _compat
 
 
 HISTORY_KEY = "rma_history"
@@ -169,17 +176,31 @@ class RmaEncoder(nn.Module):
         return torch.cat([public, latent], dim=-1)
 
 
-class _RmaFreezeCallback(Callback):
-    """Holds the base policy and ``mu`` still once phase 2 starts."""
+_FREEZE_CALLBACK_CLS = None
 
-    def __init__(self, losses: Dict[str, "RmaLoss"]):
-        super().__init__()
-        self._losses = losses
 
-    def on_train_end(self, training_td: TensorDictBase, group: str):
-        loss = self._losses.get(group)
-        if loss is not None:
-            loss.restore_frozen()
+def _rma_freeze_callback(losses: Dict[str, "RmaLoss"]):
+    """A callback that holds the base policy and ``mu`` still once phase 2 starts.
+
+    Built here rather than at module level because its base class lives in
+    ``benchmarl.experiment``, which imports back out of ``benchmarl.algorithms``
+    -- see ``_compat.callback_base``.
+    """
+    global _FREEZE_CALLBACK_CLS
+    if _FREEZE_CALLBACK_CLS is None:
+
+        class _RmaFreezeCallback(_compat.callback_base()):
+            def __init__(self, losses):
+                super().__init__()
+                self._losses = losses
+
+            def on_train_end(self, training_td: TensorDictBase, group: str):
+                loss = self._losses.get(group)
+                if loss is not None:
+                    loss.restore_frozen()
+
+        _FREEZE_CALLBACK_CLS = _RmaFreezeCallback
+    return _FREEZE_CALLBACK_CLS(losses)
 
 
 class RmaLoss(ClipPPOLoss):
@@ -330,7 +351,7 @@ class Rma(Mappo):
             )
         self._encoders: Dict[str, RmaEncoder] = {}
         self._rma_losses: Dict[str, RmaLoss] = {}
-        callback = _RmaFreezeCallback(self._rma_losses)
+        callback = _rma_freeze_callback(self._rma_losses)
         callback.experiment = self.experiment
         self.experiment.callbacks.append(callback)
 

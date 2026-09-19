@@ -85,7 +85,8 @@ benchmarl/algorithms/
                          check them without torchrl
   _history.py            the observation window RMA and LIAM both need
   _compat.py             the torchrl internals the losses reach into, in one
-                         place, so a torchrl bump reports by name
+                         place, so a torchrl bump reports by name; also
+                         callback_base(), which exists because of the rule below
 benchmarl/conf/algorithm/
   happo.yaml hasac.yaml mfac.yaml liam.yaml lcpo.yaml rma.yaml ernie.yaml
 simple_ns/
@@ -100,6 +101,25 @@ baselines/
   verify.py              the offline checks -- syntax, plumbing, arithmetic
   docs/                  one checklist per baseline
 ```
+
+### One rule for anything added under `benchmarl/algorithms/`
+
+`benchmarl/__init__.py` imports `benchmarl.algorithms` **first**, and both
+`benchmarl.experiment` and `benchmarl.environments` import names back out of
+it. So an algorithm module that imports either of them at import time closes a
+cycle and `import benchmarl` fails outright:
+
+```
+ImportError: cannot import name 'IppoConfig' from partially initialized
+module 'benchmarl.algorithms'
+```
+
+Import them **inside the function that needs them** instead. `mappo_ctde.py`
+already did this for `benchmarl.environments`; HAPPO and RMA need
+`experiment.callback.Callback` as a base class, so they fetch it through
+`_compat.callback_base()` and build the callback class on first use.
+`verify.py` checks the rule structurally — it is invisible to a syntax check
+and to anything that cannot import torchrl.
 
 ### Every new environment knob is OFF by default
 

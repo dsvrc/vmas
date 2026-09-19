@@ -46,7 +46,13 @@ from benchmarl.algorithms import _compat  # submodule import: safe while
                                           # being initialised
 from benchmarl.algorithms.common import Algorithm, AlgorithmConfig
 from benchmarl.algorithms.mappo import Mappo, MappoConfig
-from benchmarl.experiment.callback import Callback
+
+#  benchmarl.experiment.callback.Callback is NOT imported here: benchmarl's own
+#  __init__ imports benchmarl.algorithms before benchmarl.experiment, and
+#  benchmarl.experiment imports names back out of benchmarl.algorithms, so an
+#  import-time dependency on it here makes `import benchmarl` fail outright.
+#  The base class is fetched at construction instead -- see
+#  `_sequential_freeze_callback` below and `_compat.callback_base`.
 
 
 #  HARL gives every agent ``ppo_epoch`` epochs over ``actor_num_mini_batch``
@@ -60,8 +66,12 @@ from benchmarl.experiment.callback import Callback
 #  split without importing torchrl.
 
 
-class _SequentialFreezeCallback(Callback):
-    """Writes the authoritative parameters back once per iteration per group.
+_FREEZE_CALLBACK_CLS = None
+
+
+def _sequential_freeze_callback(losses: Dict[str, "HappoLoss"]):
+    """A callback that writes the authoritative parameters back once per
+    iteration per group.
 
     The sequential update must leave the agents that are not currently being
     updated exactly where they were.  Their gradient is already exactly zero --
@@ -78,17 +88,27 @@ class _SequentialFreezeCallback(Callback):
     it at the top of every forward; this callback does the final restore after
     the last optimiser step of the iteration, so the parameters used for the
     NEXT collection are the sequential ones too.
+
+    Built here rather than at module level because its base class lives in
+    ``benchmarl.experiment``, which imports back out of ``benchmarl.algorithms``
+    -- see ``_compat.callback_base``.
     """
+    global _FREEZE_CALLBACK_CLS
+    if _FREEZE_CALLBACK_CLS is None:
 
-    def __init__(self, losses: Dict[str, "HappoLoss"]):
-        super().__init__()
-        self._losses = losses
+        class _SequentialFreezeCallback(_compat.callback_base()):
+            def __init__(self, losses):
+                super().__init__()
+                self._losses = losses
 
-    def on_train_end(self, training_td: TensorDictBase, group: str):
-        loss = self._losses.get(group)
-        if loss is not None:
-            loss.commit_current_agent()
-            loss.restore_frozen_agents()
+            def on_train_end(self, training_td: TensorDictBase, group: str):
+                loss = self._losses.get(group)
+                if loss is not None:
+                    loss.commit_current_agent()
+                    loss.restore_frozen_agents()
+
+        _FREEZE_CALLBACK_CLS = _SequentialFreezeCallback
+    return _FREEZE_CALLBACK_CLS(losses)
 
 
 class HappoLoss(ClipPPOLoss):
@@ -328,7 +348,7 @@ class Happo(Mappo):
             Any value ``c > 1`` clamps the factor to ``[1/c, c]`` as a guard
             against the product of N ratios overflowing.
         freeze_non_updating_agents (bool): hold the agents outside the current
-            block exactly still. See :class:`_SequentialFreezeCallback`.
+            block exactly still. See :func:`_sequential_freeze_callback`.
 
     All other arguments are :class:`~benchmarl.algorithms.Mappo`'s and should be
     left at the values the MAPPO row uses, so that the comparison isolates the
@@ -368,7 +388,7 @@ class Happo(Mappo):
             )
 
         self._happo_losses: Dict[str, HappoLoss] = {}
-        callback = _SequentialFreezeCallback(self._happo_losses)
+        callback = _sequential_freeze_callback(self._happo_losses)
         callback.experiment = self.experiment
         self.experiment.callbacks.append(callback)
 

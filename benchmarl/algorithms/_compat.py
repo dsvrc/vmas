@@ -61,3 +61,26 @@ def clip_bounds(loss_module):
 def leaf_params(params) -> list:
     """``[(nested_key, leaf_tensor), ...]`` for a ``TensorDictParams``."""
     return list(params.items(True, True))
+
+
+def callback_base():
+    """``benchmarl.experiment.callback.Callback``, imported at CALL time.
+
+    It must not be imported at module level from anywhere under
+    ``benchmarl/algorithms/``.  ``benchmarl/__init__.py`` imports
+    ``benchmarl.algorithms`` first; if an algorithm module then imports
+    ``benchmarl.experiment``, that package's ``experiment.py`` runs
+    ``from benchmarl.algorithms import IppoConfig, MappoConfig`` against a
+    half-built ``benchmarl.algorithms`` -- whose ``__init__`` has only reached
+    the line that started all this -- and ``import benchmarl`` dies with
+
+        ImportError: cannot import name 'IppoConfig' from partially
+        initialized module 'benchmarl.algorithms'
+
+    ``mappo_ctde.py`` avoids the same cycle through ``benchmarl.environments``
+    the same way.  ``baselines/verify.py`` checks the rule statically, because
+    it is invisible until the package is actually imported.
+    """
+    from benchmarl.experiment.callback import Callback
+
+    return Callback

@@ -117,6 +117,78 @@ check(
     "\n       ".join(bad) if bad else "{} files".format(len(SOURCES)),
 )
 
+#  benchmarl/__init__.py imports benchmarl.algorithms FIRST, and
+#  benchmarl.experiment / benchmarl.environments both import names back OUT of
+#  benchmarl.algorithms.  So a module under benchmarl/algorithms/ that imports
+#  either of them at import time closes a cycle and `import benchmarl` dies
+#  with "cannot import name 'IppoConfig' from partially initialized module".
+#  It has already happened once.  mappo_ctde.py documents the same rule for
+#  benchmarl.environments; the fix is always to import inside the function that
+#  needs it.  This is invisible to a syntax check and to anything that cannot
+#  import torchrl, so it is checked structurally.
+CYCLE_PRONE = ("benchmarl.experiment", "benchmarl.environments")
+
+
+def _import_time_nodes(body):
+    """Statements that run when the module is imported.
+
+    Recurses into ``if`` / ``try`` / ``class`` bodies -- all of which execute at
+    import time -- but deliberately NOT into function bodies, which are exactly
+    where a lazy import is supposed to live.
+    """
+    for node in body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            yield node
+        elif isinstance(node, (ast.If, ast.Try, ast.ClassDef)):
+            yield from _import_time_nodes(node.body)
+            yield from _import_time_nodes(getattr(node, "orelse", []))
+            yield from _import_time_nodes(getattr(node, "finalbody", []))
+            for handler in getattr(node, "handlers", []):
+                yield from _import_time_nodes(handler.body)
+
+
+cycles = []
+for _path in sorted(ALGO_DIR.glob("*.py")):
+    tree = ast.parse(_path.read_text(encoding="utf-8"))
+    for node in _import_time_nodes(tree.body):
+        names = (
+            [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else [alias.name for alias in node.names]
+        )
+        for name in names:
+            if any(name.startswith(prefix) for prefix in CYCLE_PRONE):
+                cycles.append("{}:{} imports {}".format(_path.name, node.lineno, name))
+check(
+    "no algorithm imports benchmarl.experiment/environments at import time",
+    not cycles,
+    "\n       ".join(cycles) if cycles else "checked every module-level import",
+)
+
+#  The other half of the same rule.  `from benchmarl.algorithms import X` at
+#  import time is an ATTRIBUTE lookup on a package that is still half-built, so
+#  it only works when X is a SUBMODULE -- python falls back to importing it.
+#  Ask for a class defined in __init__ and you get the same ImportError.
+attr_imports = []
+for _path in sorted(ALGO_DIR.glob("*.py")):
+    tree = ast.parse(_path.read_text(encoding="utf-8"))
+    for node in _import_time_nodes(tree.body):
+        if isinstance(node, ast.ImportFrom) and node.module == "benchmarl.algorithms":
+            for alias in node.names:
+                if not (ALGO_DIR / "{}.py".format(alias.name)).exists():
+                    attr_imports.append(
+                        "{}:{} imports the name '{}', which is not a submodule".format(
+                            _path.name, node.lineno, alias.name
+                        )
+                    )
+check(
+    "every `from benchmarl.algorithms import X` names a submodule",
+    not attr_imports,
+    "\n       ".join(attr_imports)
+    if attr_imports
+    else "the package is half-built at that point; only submodules resolve",
+)
+
 
 # ===========================================================================
 print("\n== registry and imports ==")
