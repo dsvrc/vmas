@@ -39,6 +39,14 @@ EXTRA="${EXTRA:-}"
 OUT_ROOT="${OUT_ROOT:-runs/baselines}"
 LIST="${LIST:-0}"
 
+#  Fail fast by default, which is what you want on a first run: the first row
+#  that dies stops the sweep and you read one traceback instead of forty.
+#  KEEP_GOING=1 for an overnight sweep, where one bad row should not cost the
+#  other thirty-nine; the failures are collected and printed at the end, and
+#  the script still exits non-zero.
+KEEP_GOING="${KEEP_GOING:-0}"
+BASELINE_FAILURES=""
+
 #  Number of agents in the host, read from the task config rather than assumed:
 #  HAPPO's optimiser budget is split agent by agent, so this number changes the
 #  launch line.
@@ -87,9 +95,19 @@ run_one () {
     fi
     echo "== ${HOST} | sigma ${SIGMA} | seed ${seed} | ${name}"
     mkdir -p "${dir}"
-    # shellcheck disable=SC2086
-    python simple_ns/run.py \
-      "${COMMON[@]}" "seed=${seed}" "experiment.save_folder=${dir}" "$@" ${EXTRA}
+    if [ "${KEEP_GOING}" = "1" ]; then
+      # shellcheck disable=SC2086
+      if ! python simple_ns/run.py \
+        "${COMMON[@]}" "seed=${seed}" "experiment.save_folder=${dir}" "$@" ${EXTRA}
+      then
+        echo "!! FAILED: ${name} seed ${seed} -- continuing (KEEP_GOING=1)"
+        BASELINE_FAILURES="${BASELINE_FAILURES} ${name}/s${seed}"
+      fi
+    else
+      # shellcheck disable=SC2086
+      python simple_ns/run.py \
+        "${COMMON[@]}" "seed=${seed}" "experiment.save_folder=${dir}" "$@" ${EXTRA}
+    fi
   done
 }
 

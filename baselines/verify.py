@@ -83,6 +83,42 @@ def load_module(path: Path, name: str):
 
 
 # ===========================================================================
+print("\n== syntax, on THIS interpreter ==")
+# ===========================================================================
+#  The cluster's python is not this laptop's.  Nothing here can be imported
+#  without torchrl, but everything here can be PARSED, and a SyntaxError is the
+#  one failure that costs a queue slot before a single frame is collected.
+#  It has already happened once: a backslash inside an f-string expression is
+#  Python 3.12 syntax (PEP 701) and the cluster runs older, so this file itself
+#  would not parse there.
+
+SOURCES = (
+    sorted(ALGO_DIR.glob("*.py"))
+    + sorted((ROOT / "benchmarl" / "environments" / "simple_ns").glob("*.py"))
+    + [
+        ROOT / "simple_ns" / "baselines.py",
+        ROOT / "simple_ns" / "observer.py",
+        ROOT / "simple_ns" / "layer.py",
+        ROOT / "simple_ns" / "hosts.py",
+        ROOT / "simple_ns" / "run.py",
+    ]
+)
+bad = []
+for _path in SOURCES:
+    if not _path.exists():
+        continue
+    try:
+        compile(_path.read_text(encoding="utf-8"), str(_path), "exec")
+    except SyntaxError as err:
+        bad.append("{}:{} {}".format(_path.name, err.lineno, err.msg))
+check(
+    "every baseline source parses on python {}.{}".format(*sys.version_info[:2]),
+    not bad,
+    "\n       ".join(bad) if bad else "{} files".format(len(SOURCES)),
+)
+
+
+# ===========================================================================
 print("\n== registry and imports ==")
 # ===========================================================================
 
@@ -269,13 +305,17 @@ check(
 )
 
 arm_names = set(re.findall(r'"(eso|rls_raw)":', hosts_src))
+#  Counted into locals first: a backslash inside an f-string expression is
+#  Python 3.12 syntax (PEP 701) and this file has to parse on the cluster's
+#  interpreter, which is older.  Same rule everywhere else in this tree.
+n_eso = hosts_src.count('"eso":')
+n_rls = hosts_src.count('"rls_raw":')
 check(
     "hosts.py registers both B10 arms for every host",
-    arm_names == {"eso", "rls_raw"}
-    and hosts_src.count('"eso":') == 4
-    and hosts_src.count('"rls_raw":') == 4,
-    f"arms {sorted(arm_names)}, eso entries {hosts_src.count('\"eso\":')}, "
-    f"rls_raw entries {hosts_src.count('\"rls_raw\":')}",
+    arm_names == {"eso", "rls_raw"} and n_eso == 4 and n_rls == 4,
+    "arms {}, eso entries {}, rls_raw entries {}".format(
+        sorted(arm_names), n_eso, n_rls
+    ),
 )
 
 for host in ("balance", "transport", "sampling", "navigation"):

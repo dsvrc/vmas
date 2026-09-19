@@ -7,8 +7,19 @@ against the paper **and** the authors' own code, one baseline per algorithm.
 python baselines/verify.py          # ~2 s, torch only. Run this first.
 python simple_ns/check_plumbing.py  # ~1 s, torch only.
 LIST=1 bash scripts/run_baselines.sh   # print every launch line, run nothing
-bash scripts/run_baselines.sh          # run them
+
+# SMOKE FIRST -- one iteration of every row, into a throwaway OUT_ROOT:
+FRAMES=12000 BATCH=6000 ENVS=60 SEEDS=0 OUT_ROOT=runs/smoke \
+  EXTRA="experiment.off_policy_n_optimizer_steps=20 experiment.evaluation=false" \
+  KEEP_GOING=1 bash scripts/run_baselines.sh
+
+bash scripts/run_baselines.sh          # then the real thing
 ```
+
+`verify.py` parses every source file on **the interpreter you are running it
+with**, before anything else, because the cluster's python is not the laptop's:
+a backslash inside an f-string expression is Python 3.12 syntax and older
+interpreters reject the file outright.
 
 ---
 
@@ -86,7 +97,7 @@ scripts/
   baselines_common.sh    the table: one function per row
   run_baselines.sh       the entry point
 baselines/
-  verify.py              60 offline checks
+  verify.py              the offline checks -- syntax, plumbing, arithmetic
   docs/                  one checklist per baseline
 ```
 

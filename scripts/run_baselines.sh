@@ -5,6 +5,19 @@
 #      LIST=1 bash scripts/run_baselines.sh          # print the plan, run nothing
 #      GROUP="b1 b10" bash scripts/run_baselines.sh  # one or more classes
 #      ONLY="happo lcpo" bash scripts/run_baselines.sh
+#      KEEP_GOING=1 bash scripts/run_baselines.sh    # don't let one bad row
+#                                                    # kill an overnight sweep
+#
+#  SMOKE TEST FIRST.  Nothing in this tree has ever been run end to end; the
+#  point of a smoke run is to reach every algorithm's construction banner and
+#  one training iteration, which is where a wiring error shows up:
+#
+#      FRAMES=12000 BATCH=6000 ENVS=60 SEEDS=0 OUT_ROOT=runs/smoke \
+#        EXTRA="experiment.off_policy_n_optimizer_steps=20 experiment.evaluation=false" \
+#        KEEP_GOING=1 bash scripts/run_baselines.sh
+#
+#  A different OUT_ROOT means the smoke runs do not mark the real ones as
+#  already finished.
 #
 #  Class names: reference b1 b2 b3 b4 b5 b6 b8 b9 b10 grants
 #  Everything else -- host, severity, seeds, devices, frame budget -- is set in
@@ -65,3 +78,10 @@ echo "== done =="
 echo "Each run wrote pact_debug.csv beside itself. Read it in the order the"
 echo "columns are documented in benchmarl/environments/simple_ns/common.py:"
 echo "did the dial fire, how big was it, and only then, did the row win."
+
+if [ -n "${BASELINE_FAILURES}" ]; then
+  echo
+  echo "!! these rows FAILED and were skipped (KEEP_GOING=1):"
+  for failed in ${BASELINE_FAILURES}; do echo "     ${failed}"; done
+  exit 1
+fi
