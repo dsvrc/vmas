@@ -122,6 +122,28 @@ def has_critic(loss_module) -> bool:
     return bool(coef is not None and coef > 0)
 
 
+def qvalue_v2_loss(loss_module, tensordict):
+    """``(loss_qvalue, metadata)`` from a torchrl SAC loss.
+
+    torchrl 0.11 promoted ``_qvalue_v2_loss`` to the public ``qvalue_v2_loss``;
+    0.7.x -- which is what the cluster's `vmas` env has -- only has the private
+    spelling.  The body is the same in both.
+
+    Note the return shape also differs: 0.7.x hands back a per-sample tensor
+    (``.sum(0)`` over the Q-nets), 0.11 reduces it to a scalar.  Callers must
+    reduce it themselves.
+    """
+    for name in ("qvalue_v2_loss", "_qvalue_v2_loss"):
+        method = getattr(loss_module, name, None)
+        if method is not None:
+            return method(tensordict)
+    raise AttributeError(
+        "neither qvalue_v2_loss nor _qvalue_v2_loss exists on "
+        f"{type(loss_module).__name__}; torchrl's SAC loss has changed shape "
+        "again and benchmarl/algorithms/_compat.py needs a new case."
+    )
+
+
 def leaf_params(params) -> list:
     """``[(nested_key, leaf_tensor), ...]`` for a ``TensorDictParams``."""
     return list(params.items(True, True))

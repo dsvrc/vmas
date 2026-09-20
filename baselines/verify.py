@@ -270,6 +270,83 @@ check(
 
 
 # ===========================================================================
+print("\n== torchrl, if it is installed ==")
+# ===========================================================================
+#  Every loss here subclasses a torchrl loss and calls into methods torchrl
+#  marks private, and those names MOVE between releases.  The cluster's `vmas`
+#  env is torchrl 0.7.x while setup.py pins >=0.10, so the two sides disagree
+#  about, among others, `qvalue_v2_loss` (0.11) vs `_qvalue_v2_loss` (0.7) and
+#  `entropy_coeff` (0.9+) vs `entropy_coef`.  `_compat` shims each one; this
+#  section checks the shims can actually find something on the torchrl that is
+#  installed HERE.  It is skipped, loudly, when torchrl is absent.
+
+try:
+    import torchrl
+    from torchrl.objectives import ClipPPOLoss, SACLoss
+except Exception as _err:  # noqa: BLE001 -- any import failure means "skip"
+    print(
+        "[SKIP] torchrl is not importable here ({}: {}), so its API cannot be "
+        "checked.\n       Run this on the machine that will train -- these are "
+        "the checks that\n       catch a version mismatch before it costs a "
+        "queue slot.".format(type(_err).__name__, _err)
+    )
+else:
+    import torch as _torch
+
+    print(
+        "       torchrl {}, torch {}".format(torchrl.__version__, _torch.__version__)
+    )
+    compat = load_module(ALGO_DIR / "_compat.py", "_bl_compat")
+
+    #  Alias groups: at least one spelling of each must exist.
+    for cls, groups in (
+        (
+            ClipPPOLoss,
+            [
+                ("_log_weight",),
+                ("_get_entropy",),
+                ("_clip_bounds",),
+                ("loss_critic",),
+            ],
+        ),
+        (
+            SACLoss,
+            [
+                ("qvalue_v2_loss", "_qvalue_v2_loss"),
+                ("_compute_target_v2",),
+                ("_alpha_loss",),
+                ("_alpha",),
+            ],
+        ),
+    ):
+        absent = [g for g in groups if not any(hasattr(cls, n) for n in g)]
+        check(
+            "{}: every internal the baselines reach into exists".format(cls.__name__),
+            not absent,
+            "missing every spelling of: {}".format(absent)
+            if absent
+            else "checked {} name groups".format(len(groups)),
+        )
+
+    #  The constructor coefficient names, which is the one that failed SILENTLY:
+    #  before the shim, `entropy_coeff=` went into PPOLoss's unchecked **kwargs
+    #  on 0.7.x and the configured value was simply dropped.
+    try:
+        coeffs = compat.coefficient_kwargs(ClipPPOLoss, 0.0, 1.0)
+    except Exception as err:  # noqa: BLE001
+        coeffs, coeff_err = {}, err
+    else:
+        coeff_err = None
+    check(
+        "the PPO coefficient kwargs resolve to names this torchrl accepts",
+        coeff_err is None and len(coeffs) == 2,
+        "resolved {}".format(sorted(coeffs))
+        if coeff_err is None
+        else "{}: {}".format(type(coeff_err).__name__, coeff_err),
+    )
+
+
+# ===========================================================================
 print("\n== registry and imports ==")
 # ===========================================================================
 

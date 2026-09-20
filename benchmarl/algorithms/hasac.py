@@ -48,6 +48,7 @@ from tensordict.nn import TensorDictModule
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import LossModule, SACLoss, ValueEstimators
 
+from benchmarl.algorithms import _compat
 from benchmarl.algorithms.common import Algorithm, AlgorithmConfig
 from benchmarl.algorithms.masac import Masac, MasacConfig
 
@@ -250,7 +251,9 @@ class HasacLoss(SACLoss):
         self._advance()
         agent = self.current_agent()
 
-        loss_qvalue, value_metadata = self.qvalue_v2_loss(tensordict)
+        #  Through _compat: torchrl 0.11 calls this `qvalue_v2_loss`, 0.7.x
+        #  -- the cluster's version -- only has `_qvalue_v2_loss`.
+        loss_qvalue, value_metadata = _compat.qvalue_v2_loss(self, tensordict)
         loss_actor, log_prob = self.hasac_actor_loss(tensordict, agent)
 
         #  HARL: alpha_loss = -(log_alpha[m] * (logp[m].detach() + H*[m])).mean()
