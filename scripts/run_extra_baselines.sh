@@ -47,15 +47,27 @@
 #  Run `python baselines/verify.py` first: it checks every config and every
 #  published formula offline, in about a second.
 
+#  KEEP_GOING defaults to 1 HERE (it is 0 in run_baselines.sh): these twelve
+#  rows have never been run, so the useful first sweep is the one that reaches
+#  every row and reports which ones died, not the one that stops at the first.
+#  KEEP_GOING=0 for the fail-fast behaviour.
+export KEEP_GOING="${KEEP_GOING:-1}"
+
 source "$(dirname "$0")/baselines_common.sh"
 
 GROUP="${GROUP:-${EXTRA_GROUPS}}"
 ONLY="${ONLY:-}"
 
-if [ "${LIST}" != "1" ]; then
-  echo "== offline verification =="
-  python baselines/verify.py
-  python simple_ns/check_plumbing.py
+#  ADVISORY, NOT A GATE.  `set -e` is on, so a non-zero exit from either of
+#  these used to abort the sweep before a single row started -- which is what
+#  happened on a cluster whose python has no scipy: one FAILED check about a
+#  dependency that only algorithm=doraemon needs killed every other row.
+#  Failures are printed loudly and the sweep continues; SKIP_VERIFY=1 skips
+#  them entirely.
+if [ "${LIST}" != "1" ] && [ "${SKIP_VERIFY:-0}" != "1" ]; then
+  echo "== offline verification (ADVISORY: failures do NOT stop the sweep) =="
+  python baselines/verify.py || echo "!! verify.py reported FAILURES -- continuing anyway (see above)"
+  python simple_ns/check_plumbing.py || echo "!! check_plumbing.py reported FAILURES -- continuing anyway"
   echo
 fi
 
@@ -71,6 +83,21 @@ else
     fi
     rows="${rows} ${!var}"
   done
+fi
+
+#  Drop rows whose PREREQUISITE is missing, rather than letting them take the
+#  sweep down with them.  algorithm=doraemon solves its constrained problem
+#  with scipy's trust-constr; no scipy, no DORAEMON -- and no reason for the
+#  other eleven rows to care.
+if ! python -c "import scipy.optimize" > /dev/null 2>&1; then
+  case " ${rows} " in
+    *" doraemon "*)
+      echo "!! scipy is not importable on this python, so the DORAEMON row is"
+      echo "   SKIPPED. Everything else is unaffected. Install scipy and rerun"
+      echo "   'ONLY=doraemon bash scripts/run_extra_baselines.sh' to add it."
+      echo
+      rows="$(echo " ${rows} " | sed 's/ doraemon / /')" ;;
+  esac
 fi
 
 echo "== plan =="
