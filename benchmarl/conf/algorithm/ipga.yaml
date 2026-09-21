@@ -1,0 +1,83 @@
+defaults:
+  - ipga_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# IPGA / INPG (EXTRA baseline X3) -- independent learning in PERFORMATIVE
+# Markov potential games.
+#
+#   Sahitaj, Sasnauskas, Yalin, Mandal, Radanovic, arXiv 2504.20593.
+#
+# The one baseline here whose ASSUMPTIONS this instance actually satisfies:
+# simple_ns's transition kernel is a function of the deployed joint policy
+# (the disturbance is a weighted mean of the neighbours' exertions), which is
+# the paper's performative Markov game verbatim.
+#
+# Launch with `experiment.share_policy_params=false`: these are INDEPENDENT
+# learners and the convergence results are about what N separate updates do to
+# the joint policy.  With one shared policy there is one update and
+# "independent" is vacuous; the algorithm warns.
+#
+# See baselines/docs/ipga.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited IPPO plumbing.  INDEPENDENT critic is part of the method, not
+#     a convenience: Abar_i is the agent's own marginalised advantage. -------
+share_param_critic: True      # parameter sharing across agents WITHIN the
+                              # critic ensemble; each agent still has its own
+                              # value estimate on its own observation, which is
+                              # what "independent" means here. IPPO's default.
+clip_epsilon: 0.2             # UNUSED: neither IPGA nor INPG clips. Kept
+                              # because the loss subclasses torchrl's
+                              # ClipPPOLoss for its critic and GAE machinery.
+entropy_coef: 0.0             # neither algorithm has an entropy bonus.
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- which of the two algorithms -------------------------------------------
+variant: ipga            # ipga -> proximal / projected policy gradient ascent:
+                         #         argmax_pi <pi, Qbar> - 1/(2 eta)||pi-pi^t||^2
+                         #         Best-iterate convergence to an approximate
+                         #         performatively stable equilibrium.
+                         # inpg -> independent NATURAL policy gradient:
+                         #         pi^{t+1} prop-to pi^t exp(eta/(1-gamma) Abar)
+                         #         Asymptotic LAST-iterate convergence, the
+                         #         stronger result. Run both.
+
+# --- the step size ----------------------------------------------------------
+eta: 0.05                # A SWEPT QUANTITY IN THE PAPER, not a published
+                         # constant: its theory fixes eta only through the
+                         # smoothness constants of the game, which are not
+                         # measurable here. It enters differently in the two
+                         # variants -- as the proximal weight 1/(2 eta) in
+                         # IPGA and as the multiplier eta/(1-gamma) on the
+                         # natural gradient in INPG -- so it does NOT transfer
+                         # between the rows and each should be swept. The
+                         # algorithm prints the effective coefficient at
+                         # construction.
+                         #
+                         # WATCH ipga_dist_move: it is the L2 distance the
+                         # action distribution moved in one deployment, i.e.
+                         # the quantity the paper's sensitivity assumption
+                         # multiplies by omega_r and omega_p to bound how far
+                         # the ENVIRONMENT moves in response. If it does not
+                         # settle, there is no last iterate to converge to.
+
+# --- INPG's natural-gradient solve -----------------------------------------
+damping: 0.1             # Fisher damping, as in every TRPO-family solver.
+cg_iters: 15             # conjugate-gradient iterations for F^-1 g.
+nat_batch: 1024          # cap on the joint states the Fisher is built from.
+                         # 0 uses the whole rollout, which is what the paper's
+                         # exact update does; each CG iteration costs two
+                         # Fisher-vector products over the set.
+max_kl: 0.0              # OFF, and NOT PART OF THE METHOD. INPG takes a fixed
+                         # step and has no trust region. A positive value
+                         # rescales the step so that its quadratic form under
+                         # the Fisher is at most this, i.e. a declared safety
+                         # bound for a run where the unconstrained natural
+                         # gradient diverges. If you turn it on, say so: the
+                         # row is then INPG-with-a-trust-region.

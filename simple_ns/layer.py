@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 import torch
@@ -72,6 +73,25 @@ NS_KWARGS = (
     "ns_dr_low",
     "ns_dr_high",
     "ns_baseline",         # B10: which non-learning compensator arm, if any
+    #  ---- added for the EXTRA baselines; see baselines/README_EXTRA.md ----
+    "ns_observe_prev_reward",  # X4/X6: the reward of the transition that
+                               # produced this observation, so a WINDOW of
+                               # observations is a window of (o, a, r) -- the
+                               # context WISDOM's encoder and M3W's n-step
+                               # return are both defined on.
+    "ns_observe_time",         # X2: t / horizon.  DEDA-FP's average policy and
+                               # its conditional normalising flow are both
+                               # conditioned on the time index.
+    "ns_time_horizon",         # the denominator for ns_observe_time; 0 means
+                               # "use ns_period".
+    "ns_dr_dist",              # X5: uniform (B9's fixed range) or beta
+                               # (DORAEMON's adaptive one).  NOTE: no quoted
+                               # words in this block -- check_plumbing.py reads
+                               # the kwarg names by scraping quoted strings out
+                               # of it, so a quoted word in a comment becomes a
+                               # phantom scenario key.
+    "ns_dr_a",                 # the initial Beta shape parameters.  DORAEMON
+    "ns_dr_b",                 # replaces them between training rounds.
 )
 
 #: BASELINES.md B10.  Read only by `simple_ns/baselines.py`; declared here so
@@ -151,11 +171,52 @@ class ExertionMixin:
         #  already uses (the jack measures the force it delivered) -- and it is
         #  one step stale for the same reason.  Off by default.
         self._observe_prev_action = bool(raw.get("ns_observe_prev_action", False))
+        #  X4 (WISDOM) / X6 (M3W).  Both are defined on a window of TRANSITIONS
+        #  -- (o, a, r, o') for WISDOM's context encoder, (o, a, r) for M3W's
+        #  n-step return -- and a window of observations only becomes a window
+        #  of transitions if the reward is in the observation.  This is the
+        #  reward of the transition that produced THIS observation: vmas
+        #  computes rewards before observations inside one `step`, so it is
+        #  causal, and it is the agent's OWN reward, which it has always been
+        #  told.  Off by default.
+        self._observe_prev_reward = bool(raw.get("ns_observe_prev_reward", False))
+        #  X2 (DEDA-FP).  The average policy and the conditional normalising
+        #  flow are both conditioned on the TIME index -- a mean-field game is
+        #  a finite-horizon object and its equilibrium is time-dependent.  This
+        #  publishes t/horizon in [0, 1], where t is the step index WITHIN the
+        #  episode.  Off by default.
+        self._observe_time = bool(raw.get("ns_observe_time", False))
+        self._time_horizon = float(raw.get("ns_time_horizon", 0) or 0.0)
         #  BASELINES.md B9's must-run robust baseline: resample sigma per
         #  episode from [low, high] and train the stock learner on the mixture.
         self._dr_enabled = bool(raw.get("ns_dr_enabled", False))
         self._dr_low = float(raw.get("ns_dr_low", 0.0))
         self._dr_high = float(raw.get("ns_dr_high", 3.0))
+        #  X5 (DORAEMON).  "uniform" is B9's fixed U[low, high].  "beta" is
+        #  DORAEMON's Beta(a, b) rescaled onto the same support, with (a, b)
+        #  REPLACED between training rounds by the algorithm through
+        #  simple_ns/dr_state.py.  The initial values here are DORAEMON's own
+        #  `init_beta_param` convention: a = b = 100 is a distribution tightly
+        #  concentrated on the middle of the support, which is what its entropy
+        #  maximisation starts from and grows outward.
+        self._dr_dist = str(raw.get("ns_dr_dist", "uniform"))
+        if self._dr_dist not in ("uniform", "beta"):
+            raise ValueError(
+                f"ns_dr_dist must be 'uniform' or 'beta'; got {self._dr_dist!r}"
+            )
+        self._dr_a = float(raw.get("ns_dr_a", 100.0))
+        self._dr_b = float(raw.get("ns_dr_b", 100.0))
+        if self._dr_dist == "beta" and not self._dr_enabled:
+            raise ValueError(
+                "ns_dr_dist=beta with ns_dr_enabled=false: the Beta is the "
+                "distribution the per-episode severity is DRAWN from, so there "
+                "is nothing for it to parameterise. Set ns_dr_enabled=true."
+            )
+        if self._dr_dist == "beta" and not (self._dr_a > 0 and self._dr_b > 0):
+            raise ValueError(
+                f"ns_dr_a={self._dr_a} ns_dr_b={self._dr_b}: a Beta needs both "
+                "shape parameters strictly positive."
+            )
         if self._dr_enabled:
             if not (0.0 <= self._dr_low <= self._dr_high):
                 raise ValueError(
@@ -167,16 +228,29 @@ class ExertionMixin:
             #  nominal to 1 here means the draw multiplies in with no division
             #  and no special case, and it makes the override impossible to
             #  miss in the log.
+            shape = (
+                f"U[{self._dr_low}, {self._dr_high}]"
+                if self._dr_dist == "uniform"
+                else (
+                    f"Beta(a={self._dr_a:g}, b={self._dr_b:g}) on "
+                    f"[{self._dr_low}, {self._dr_high}] -- DORAEMON REPLACES "
+                    "(a, b) between training rounds"
+                )
+            )
             print(
                 f"[simple_ns] DOMAIN RANDOMISATION over sigma is ON: "
-                f"sigma ~ U[{self._dr_low}, {self._dr_high}] redrawn per "
+                f"sigma ~ {shape} redrawn per "
                 f"episode per parallel world. ns_severity="
                 f"{self.ns.severity} from the task config is IGNORED for the "
                 "disturbance magnitude (it is now the draw). Evaluate this arm "
                 "at the committed sigma in a separate run -- see "
                 "baselines/docs/dr_sigma.md."
             )
-            self.ns.severity = 1.0
+            #  DialParams is frozen -- deliberately, since the dial is declared
+            #  once and must not drift during a run -- so this REPLACES it
+            #  rather than mutating it.  Done before Coupling is constructed
+            #  below, which is the only other consumer of self.ns.
+            self.ns = replace(self.ns, severity=1.0)
         # The (B) CONTROL.  See _disturbance for what it changes and why the
         # comparison between it and the default is the paper's central pair.
         self._direct = bool(raw.get("ns_direct", False))
@@ -231,6 +305,14 @@ class ExertionMixin:
         self._y_prev = torch.zeros(B, N, **f)
         self._A = torch.zeros(B, **f)
         self._clipped = torch.zeros(B, N, **f)
+        #  X4/X6: the reward of the transition that produced the observation
+        #  about to be emitted.  Filled by `reward`, which vmas calls before
+        #  `observation` inside one step; zeroed on reset, where vmas does not
+        #  call `reward` at all.
+        self._r_last = torch.zeros(B, N, **f)
+        #  X2: the step index WITHIN the episode.  self._step is the driver's
+        #  clock and is deliberately NOT reset (NS-3.4); this one is.
+        self._t_ep = torch.zeros(B, device=device, dtype=torch.long)
         #  Per-world severity.  Exactly 1.0 everywhere unless ns_dr_enabled, in
         #  which case _draw_sigma fills it; `_scale_severity` is a no-op when DR
         #  is off, so every existing arm stays bit-identical.
@@ -291,12 +373,16 @@ class ExertionMixin:
         out = super().reset_world_at(env_index)
         if env_index is None:
             for t in (self._u_prev, self._Q, self._ehat, self._x, self._load,
-                      self._d, self._y, self._y_prev, self._clipped):
+                      self._d, self._y, self._y_prev, self._clipped,
+                      self._r_last):
                 t.zero_()
+            self._t_ep.zero_()
         else:
             for t in (self._u_prev, self._Q, self._ehat, self._x, self._load,
-                      self._d, self._y, self._y_prev, self._clipped):
+                      self._d, self._y, self._y_prev, self._clipped,
+                      self._r_last):
                 t[env_index] = 0.0
+            self._t_ep[env_index] = 0
         # NS-3.4: the driver's clock is NOT reset.  The bearing does not un-wear
         # and the afternoon does not un-warm because an episode ended.
         if self._dr_enabled:
@@ -310,12 +396,60 @@ class ExertionMixin:
 
     def _draw_sigma(self, env_index: Optional[int]) -> None:
         lo, hi = self._dr_low, self._dr_high
+        if self._dr_dist == "beta":
+            #  X5 (DORAEMON).  `DomainRandDistribution.sample` with
+            #  dr_type='beta': draw x ~ Beta(a, b) and map it onto the support
+            #  with y = x * (M - m) + m.  (a, b) come from the live
+            #  distribution the algorithm published, falling back to the task
+            #  config's values before the first DORAEMON round has run.
+            a, b = self._beta_params()
+            dist = torch.distributions.Beta(
+                torch.tensor(a, device=self._sigma.device),
+                torch.tensor(b, device=self._sigma.device),
+            )
+            if env_index is None:
+                self._sigma.copy_(
+                    dist.sample(self._sigma.shape) * (hi - lo) + lo
+                )
+            else:
+                self._sigma[env_index] = dist.sample() * (hi - lo) + lo
+            return
         if env_index is None:
             self._sigma.uniform_(lo, hi)
         else:
             self._sigma[env_index] = (
                 torch.rand((), device=self._sigma.device) * (hi - lo) + lo
             )
+
+    def _beta_params(self):
+        """``(a, b)`` for the Beta draw: the algorithm's, or the config's.
+
+        Imported HERE rather than at module scope so that a run with
+        ``ns_dr_dist=uniform`` -- which is every arm except DORAEMON -- never
+        touches the registry at all.
+        """
+        from simple_ns import dr_state
+
+        live = dr_state.current()
+        if live is None:
+            return self._dr_a, self._dr_b
+        #  The support is the task's, not the algorithm's: DORAEMON optimises
+        #  the SHAPE of the distribution inside a fixed range, and the range is
+        #  the declared severity sweep. A published distribution that disagrees
+        #  about the support is a configuration error, not something to
+        #  silently reconcile.
+        if (
+            abs(live.low - self._dr_low) > 1e-9
+            or abs(live.high - self._dr_high) > 1e-9
+        ):
+            raise ValueError(
+                f"the published DR distribution is on [{live.low}, "
+                f"{live.high}] but the task's support is [{self._dr_low}, "
+                f"{self._dr_high}]. DORAEMON optimises the shape inside the "
+                "task's declared range; set algorithm.dr_low / dr_high to "
+                "task.ns_dr_low / ns_dr_high."
+            )
+        return live.a, live.b
 
     def _scale_severity(self, load: Tensor) -> Tensor:
         """Apply the per-world severity draw.  Identity unless DR is on.
@@ -519,10 +653,35 @@ class ExertionMixin:
         ).clone()
         self._y_prev = self._y.clone()
         self._step = self._step + 1
+        self._t_ep = self._t_ep + 1
 
     # ------------------------------------------------------------------
     #  sensor and read-out
     # ------------------------------------------------------------------
+
+    def reward(self, agent: Agent):
+        """The host's reward, recorded so the next observation can carry it.
+
+        Order matters and it is vmas's, not ours: inside one
+        ``Environment.step`` the simulator calls ``scenario.reward`` for every
+        agent and THEN ``scenario.observation`` for every agent (see
+        ``vmas/simulator/environment/environment.py::_get_from_scenario``).  So
+        the value stored here is the reward of the transition that produced the
+        observation about to be emitted -- ``r_t`` sitting next to ``o_{t+1}``
+        and ``a_t``, which is exactly one row of a replay buffer.  On RESET vmas
+        asks for observations with ``get_rewards=False``, so nothing is
+        recorded and ``reset_world_at`` has already zeroed the buffer: the
+        first observation of an episode carries a reward of 0, which is what
+        WISDOM's own rollout worker puts in the first slot of its context
+        window (``self.context = torch.zeros(...)``).
+
+        Inert unless ``ns_observe_prev_reward=true``.
+        """
+        r = super().reward(agent)
+        if self._observe_prev_reward:
+            i = self._agent_index[agent.name]
+            self._r_last[:, i] = r.detach().reshape(-1).to(self._r_last.dtype)
+        return r
 
     def observation(self, agent: Agent):
         obs = super().observation(agent)
@@ -549,6 +708,27 @@ class ExertionMixin:
             #  column is O(1) whatever the host's action box is.
             extra.append(
                 ("prev_action", self._u_prev[:, i] / self._u_range[i].reshape(1, -1))
+            )
+        if self._observe_prev_reward:
+            i = self._agent_index[agent.name]
+            #  X4 / X6.  RAW, not rescaled: WISDOM normalises its context with
+            #  the replay buffer's own running statistics
+            #  (`StackedReplayBuffer.normalize_data`) and M3W two-hot-encodes
+            #  the reward over a declared [reward_min, reward_max], so both
+            #  methods do their own scaling and a constant here would only make
+            #  that scaling wrong by a factor nobody records.
+            extra.append(("prev_reward", self._r_last[:, i : i + 1]))
+        if self._observe_time:
+            #  X2.  t / horizon in [0, 1], clamped, so a host whose episode
+            #  outruns the declared horizon saturates rather than extrapolates.
+            horizon = self._time_horizon or float(self.ns.period)
+            extra.append(
+                (
+                    "time",
+                    (self._t_ep.reshape(-1, 1).to(torch.float32) / horizon).clamp(
+                        0.0, 1.0
+                    ),
+                )
             )
         if not extra:
             return obs
@@ -581,6 +761,21 @@ class ExertionMixin:
             }
         )
         return info
+
+    # ------------------------------------------------------------------
+    #  X5 -- what DORAEMON needs back out of the environment
+    # ------------------------------------------------------------------
+
+    def dr_sigma(self) -> Tensor:
+        """The per-world severity draw, ``(B,)``.
+
+        DORAEMON's performance constraint is an importance-sampling estimate
+        over the dynamics parameters the episodes were actually run at, so the
+        algorithm needs the draw itself and not only the return it produced.
+        ``info`` already publishes it per agent; this is the same tensor
+        without the agent axis, for a caller that has the scenario.
+        """
+        return self._sigma
 
     # ------------------------------------------------------------------
     #  NS-3.3 -- fail loudly when the layer is inert

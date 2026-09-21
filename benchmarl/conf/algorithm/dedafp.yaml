@@ -1,0 +1,97 @@
+defaults:
+  - dedafp_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# DEDA-FP (EXTRA baseline X2) -- deep fictitious play for continuous,
+# non-stationary mean field games.
+#
+#   Magnino, Shao, Wu, Shen, Lauriere, arXiv 2510.22158 (NeurIPS 2025).
+#
+# REQUIRES `task.ns_observe_time=true`: both the average policy and the
+# conditional normalising flow are functions of t, and a finite-horizon mean
+# field equilibrium is not defined without it.
+#
+# Launch with `task.pact_enabled=false`.  This arm is a different answer to the
+# same question, not a companion to PACT.
+#
+# See baselines/docs/dedafp.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited IPPO plumbing.  The best-response step is ordinary PPO, which
+#     is what Algorithm 3 line 1 allows ("SAC or PPO"). ---------------------
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- the fictitious-play outer loop ----------------------------------------
+fp_iters: 10             # K.  The paper uses 5-20; the frame budget is split
+                         # evenly, so at the launcher's 3M frames each
+                         # iteration is 300k frames -- enough for a best
+                         # response to move and few enough that the average is
+                         # over distinguishable policies.
+deploy_average_last: True
+                         # Algorithm 3 RETURNS pibar_K, not pi*_K: in
+                         # fictitious play the equilibrium object is the
+                         # average and the best responses are how it is
+                         # computed.  BenchMARL reports the return of whatever
+                         # policy collected, so the last iteration switches the
+                         # acting policy to pibar and zeroes the best-response
+                         # objective.  The headline number is then the
+                         # equilibrium policy's -- at the cost of one tenth of
+                         # the budget spent measuring rather than training.
+                         # False reports the last best response instead; say
+                         # which one the table shows.
+
+# --- where the state and the time index live in the observation ------------
+time_start: -1           # ns_observe_time appends t/horizon LAST, so -1 is
+time_size: 1             # right for every simple_ns host. The algorithm
+                         # prints the slice it resolved and raises if it does
+                         # not fit.
+state_start: 0           # the population distribution is modelled over
+state_size: 0            # observation[state_start : state_start + size].
+                         # 0 means "everything before the time column", which
+                         # is the whole public observation. The flow is a
+                         # density over STATES given t, so t itself cannot be
+                         # one of the modelled coordinates; the algorithm
+                         # raises if the slices overlap.
+
+# --- the conditional normalising flow, Gbar ---------------------------------
+flow_layers: 8           # affine coupling layers with alternating masks.
+                         # The reference uses 16 autoregressive neural spline
+                         # layers; an affine coupling flow is the same object
+                         # with a simpler elementwise transform -- see
+                         # baselines/docs/dedafp.md, "adapted". 8 layers is 4
+                         # full passes over both halves.
+flow_hidden: 64          # width of each coupling layer's conditioner.
+flow_epochs: 200         # maximum-likelihood steps per fictitious-play
+flow_batch: 512          # iteration, and their minibatch size.
+flow_lr: 0.0003          # the reference's 3e-4.
+
+# --- the averaged policy, pibar --------------------------------------------
+sl_capacity: 200000      # M_SL.  The reference never forgets; this is a
+                         # bounded RESERVOIR, which keeps a uniform sample of
+                         # everything ever added -- so pibar is still fitted to
+                         # the uniform mixture over iterations that fictitious
+                         # play calls for, not to the recent ones.
+sl_subsample: 10         # keep one transition in n from each iteration. At the
+                         # launcher's 30000 frames per batch and 4 agents this
+                         # is ~3000 triples per iteration.
+sl_epochs: 500           # Gaussian-NLL steps per fictitious-play iteration,
+sl_batch: 512            # and their minibatch size.
+sl_lr: 0.0003            # the reference's 3e-4.
+
+# --- the density channel ----------------------------------------------------
+density_clip: 10.0       # DECLARED bound on muhat(x|t) before it reaches the
+                         # policy.  A normalising flow's density is unbounded
+                         # above; an unclipped channel would hand the policy a
+                         # spike whenever the flow over-concentrates early in
+                         # training.  Same kind of declared sensor bound as the
+                         # task's own ns_y_clip.  Watch dedafp_density: if it
+                         # sits at the clip the flow has collapsed.

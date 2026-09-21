@@ -35,7 +35,7 @@ from dataclasses import dataclass, MISSING
 from typing import Dict, Iterable, Optional, Tuple, Type
 
 import torch
-from tensordict import TensorDict, TensorDictBase
+from tensordict import TensorDict, TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule
 from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 
@@ -129,6 +129,16 @@ class HappoLoss(ClipPPOLoss):
     ``pi_current == pi_after_its_own_update``, which is exactly what HARL
     stores.
     """
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    critic_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    critic_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_critic_network_params: TensorDictParams
 
     def __init__(
         self,

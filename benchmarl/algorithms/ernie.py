@@ -36,7 +36,7 @@ from dataclasses import dataclass, MISSING
 from typing import List, Tuple, Type
 
 import torch
-from tensordict import TensorDictBase
+from tensordict import TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule
 from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 
@@ -76,6 +76,16 @@ def policy_output(dist) -> torch.Tensor:
 
 class ErnieLoss(ClipPPOLoss):
     """MAPPO's clipped loss plus ERNIE's adversarial regularizer."""
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    critic_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    critic_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_critic_network_params: TensorDictParams
 
     def __init__(
         self,

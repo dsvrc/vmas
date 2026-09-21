@@ -36,7 +36,7 @@ from dataclasses import dataclass, MISSING
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Type
 
 import torch
-from tensordict import TensorDict, TensorDictBase
+from tensordict import TensorDict, TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule
 from torchrl.objectives import ClipPPOLoss, LossModule, ValueEstimators
 
@@ -70,6 +70,16 @@ class LcpoLoss(ClipPPOLoss):
     ``loss_objective`` is a detached number for the log, with no optimiser
     bound to it, so nothing steps the actor twice.
     """
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    critic_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    critic_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_critic_network_params: TensorDictParams
 
     def __init__(
         self,

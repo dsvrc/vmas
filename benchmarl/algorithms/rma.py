@@ -40,7 +40,7 @@ from dataclasses import dataclass, MISSING
 from typing import Dict, Iterable, List, Optional, Tuple, Type
 
 import torch
-from tensordict import TensorDictBase
+from tensordict import TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule, TensorDictSequential
 from tensordict.nn.distributions import NormalParamExtractor
 from torch import nn
@@ -212,6 +212,16 @@ class RmaLoss(ClipPPOLoss):
     keeps stepping them from leftover momentum. RMA phase 2 trains ONLY the
     adaptation module, so the base policy is written back after every step.
     """
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    critic_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    critic_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_critic_network_params: TensorDictParams
 
     def __init__(self, *args, encoder: RmaEncoder, adapt_coef: float, **kwargs):
         super().__init__(*args, **kwargs)

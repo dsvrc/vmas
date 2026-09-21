@@ -63,6 +63,21 @@ def hydra_experiment(cfg: DictConfig) -> None:
     print("\nLoaded config:\n")
     print(OmegaConf.to_yaml(cfg))
 
+    #  Seeds get their own subfolder of save_folder.  Without this, every seed
+    #  of an arm shares one folder: the experiment's own run directory is
+    #  timestamped so those survive, but pact_debug.csv is written straight into
+    #  save_folder, so seed 1 overwrote seed 0's rows.  A sweep is `seed=0`,
+    #  `seed=1`, ... with one save_folder on the command line, so the split has
+    #  to happen here rather than at the call site.
+    if cfg.experiment.save_folder is not None:
+        folder = Path(str(cfg.experiment.save_folder)) / f"seed_{int(cfg.seed)}"
+        #  Experiment._setup_name mkdirs its own run folder with parents=False,
+        #  so the seed level must exist before load_experiment_from_hydra.
+        folder.mkdir(parents=True, exist_ok=True)
+        cfg.experiment.save_folder = str(folder)
+    else:
+        folder = Path(".")
+
     #  One debug row per collection iteration, written next to the run it
     #  describes.  `log_info` on the task cannot see the experiment folder, so
     #  the path is passed through the environment -- see
@@ -70,8 +85,8 @@ def hydra_experiment(cfg: DictConfig) -> None:
     #
     #  setdefault, not assignment: an explicitly exported SIMPLE_NS_DEBUG_CSV
     #  wins, which is what lets a run launched some other way still get one.
-    folder = Path(str(cfg.experiment.save_folder or "."))
     os.environ.setdefault("SIMPLE_NS_DEBUG_CSV", str(folder / "pact_debug.csv"))
+    print(f"save folder: {folder}", flush=True)
     print(f"pact debug csv: {os.environ['SIMPLE_NS_DEBUG_CSV']}\n", flush=True)
 
     load_experiment_from_hydra(cfg, task_name=choices.task).run()

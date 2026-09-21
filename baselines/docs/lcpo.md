@@ -119,6 +119,29 @@ rollouts are 512–8192 transitions and ours is 6000 joint states). This is a
 compute bound, not an algorithmic change, and it is the one knob here that is
 neither from the paper nor from the code.
 
+### (E) `ood_threshold` cannot be the paper's value
+
+The out-of-distribution test is `(mean context of the candidate − mean context
+of the recent window)² > ood_threshold`. The paper's runs use
+`--lcpo_thresh 1`, on `windy-gym`'s context scale.
+
+Here `A(t) ∈ [0, 1]`, so that squared distance **cannot reach 1.0** between two
+window means. Measured on a short local run: at `1.0`, `lcpo_branch` was 0 on
+every iteration — the reservoir never returned a batch, LCPO took the A2C
+fallback every time, and the row would have been plain advantage actor-critic
+wearing LCPO's name.
+
+The default is therefore `0.05`, a mean-context gap of about 0.22 — roughly the
+span between the quiet half of the cycle (`A = 0`) and the wet average. It is a
+swept hyper-parameter in the paper and should be swept here too; what must not
+happen is running it at a value where the mechanism is inert. **Check
+`lcpo_branch` on every LCPO run.**
+
+With `0.05` the same short run gave `lcpo_branch = 1` throughout,
+`lcpo_ood_batch` full, `lcpo_kl_out_of_d ≈ 7e-4` against its `1e-3` bound,
+`lcpo_linesearch_ok = 1`, and a non-zero `lcpo_step_norm` — i.e. the conjugate
+gradients, the dual solve, the line search and both constraints all engaged.
+
 ## Running it
 
 ```bash
@@ -133,7 +156,7 @@ The launcher sets `task.ns_observe_driver=true`,
 
 | column | what it tells you |
 |---|---|
-| `lcpo_branch` | 0 = the A2C fallback, 1 = the trust-region step. **If this stays at 0 the method never ran**: the reservoir never found a batch of out-of-distribution contexts. Lower `ood_threshold` (the paper sweeps 0.25/0.5/1/2/4) or check that the driver is actually in the observation. |
+| `lcpo_branch` | 0 = the A2C fallback, 1 = the trust-region step. **If this stays at 0 the method never ran**: the reservoir never found a batch of out-of-distribution contexts. Lower `ood_threshold` or check that the driver is actually in the observation. See (E). |
 | `lcpo_ood_batch` | how many OOD states the step used. 0 with `branch=1` is impossible. |
 | `lcpo_kl_out_of_d` | the realised out-of-distribution KL. It must sit at or under `kl_out`; if it is above, the line search is failing. |
 | `lcpo_kl_in_d` | the realised in-distribution KL, against `kl_in`. |

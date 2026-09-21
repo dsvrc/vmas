@@ -46,3 +46,12 @@ class TaskConfig:
     ns_baseline: str = MISSING
     eso_bandwidth: float = MISSING
     rls_raw_use_operator: bool = MISSING
+
+    # --- EXTRA baselines (see baselines/README_EXTRA.md) --------------------
+    # Also all OFF / inert by default.
+    ns_observe_prev_reward: bool = MISSING   # X4 WISDOM, X6 M3W
+    ns_observe_time: bool = MISSING          # X2 DEDA-FP
+    ns_time_horizon: int = MISSING           # 0 -> use ns_period
+    ns_dr_dist: str = MISSING                # X5 DORAEMON: uniform | beta
+    ns_dr_a: float = MISSING
+    ns_dr_b: float = MISSING

@@ -74,15 +74,25 @@ ood_capacity: 50000           # `ood_len = master_batch * num_epochs`, i.e. LCPO
                               # instead of growing to the frame budget.
 ood_subsample: 10             # LCPO's --ood_subsample: insert one state in n
                               # into the reservoir.
-ood_threshold: 1.0            # LCPO's --lcpo_thresh with --lcpo_ood_type l2:
+ood_threshold: 0.05           # LCPO's --lcpo_thresh with --lcpo_ood_type l2:
                               # a stored state is out of distribution when the
-                              # squared distance between its context and the
+                              # SQUARED distance between its context and the
                               # mean context of the recent window exceeds this.
-                              # The paper sweeps 0.25 / 0.5 / 1 / 2 / 4.
-                              # A(t) lives in [0, 1] here, so 1.0 means "as far
-                              # apart as the driver can get"; sweep it down if
-                              # the run never leaves the A2C branch (watch
-                              # lcpo_branch in the training log).
+                              #
+                              # NOT the paper's 1.0, and it cannot be: that
+                              # value is on windy-gym's context scale. A(t)
+                              # lives in [0, 1] here, so the squared distance
+                              # between two window means cannot reach 1.0 and
+                              # the test would NEVER fire -- measured: at 1.0
+                              # every iteration took the A2C fallback branch,
+                              # i.e. LCPO never ran. 0.05 is a mean-context gap
+                              # of ~0.22, about the span between the quiet half
+                              # of the cycle (A=0) and the wet average.
+                              #
+                              # It is a swept hyper-parameter in the paper
+                              # (0.25/0.5/1/2/4 of its own scale), so sweep it
+                              # here too -- and WATCH lcpo_branch: 0 means the
+                              # trust region never engaged and the row is A2C.
 
 # --- compute bounds --------------------------------------------------------
 trpo_batch: 1024              # Cap on the joint states used per trust-region

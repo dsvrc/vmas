@@ -34,7 +34,7 @@ from dataclasses import dataclass, MISSING
 from typing import Dict, Iterable, List, Tuple, Type
 
 import torch
-from tensordict import TensorDictBase
+from tensordict import TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule, TensorDictSequential
 from tensordict.nn.distributions import NormalParamExtractor
 from torch import nn
@@ -188,6 +188,16 @@ class LiamPolicyInput(nn.Module):
 
 class LiamLoss(ClipPPOLoss):
     """IPPO's loss plus LIAM's reconstruction loss, kept strictly apart."""
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    critic_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    critic_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_critic_network_params: TensorDictParams
 
     def __init__(
         self,

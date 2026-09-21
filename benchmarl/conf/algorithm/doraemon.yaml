@@ -1,0 +1,111 @@
+defaults:
+  - doraemon_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# DORAEMON (EXTRA baseline X5) -- domain randomisation via entropy
+# maximisation.
+#
+#   Tiboni, Klink, Peters, Tommasi, D'Eramo, Chalvatzaki, ICLR 2024
+#   (arXiv 2311.01885).  Code: gabrieletiboni/doraemon.
+#
+# BASELINES.md B9's `dr_sigma` row is FIXED randomisation over sigma ~ U[0,3].
+# This row is the same arm with the range chosen by the method instead of by
+# hand: a Beta on the same support whose entropy is maximised subject to the
+# policy still solving the task at rate alpha.  The doraemon-vs-dr_sigma pair
+# prices the CURRICULUM with everything else held fixed.
+#
+# REQUIRES:
+#     task.ns_dr_enabled=true
+#     task.ns_dr_dist=beta
+#     task.ns_dr_low / ns_dr_high == dr_low / dr_high below (the environment
+#     raises on a mismatch rather than silently drawing from another support)
+#
+# See baselines/docs/doraemon.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited MAPPO plumbing; identical to conf/algorithm/mappo.yaml ------
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- the support, which is the task's ---------------------------------------
+dr_low: 0.0
+dr_high: 3.0             # BASELINES.md B9: "resample sigma in [0, 3]". The
+                         # same range dr_sigma uses, so the two rows differ
+                         # only in the SHAPE of the distribution over it.
+
+# --- the distribution it starts from and the one it is driven toward -------
+init_a: 100.0            # the reference's init_beta_param = 100: a
+init_b: 100.0            # distribution tightly concentrated on the middle of
+                         # the support. Entropy maximisation has to start
+                         # somewhere narrow, or there is nothing to maximise.
+target_a: 1.0            # Beta(1,1) IS the uniform on the support, i.e. the
+target_b: 1.0            # maximum-entropy distribution, which is what
+                         # DORAEMON's `target_distr` is. Minimising
+                         # KL(phi || uniform) is maximising entropy.
+
+# --- the constrained problem ------------------------------------------------
+success_rate: 0.5        # alpha. The paper's own experiments use the
+                         # "succRate50" config, i.e. 0.5.
+success_return: 0.0      # tau -- the return at or above which an episode
+                         # counts as SOLVED.
+                         #
+                         # SET THIS FROM YOUR OWN B0 ROW. It is the only
+                         # host-dependent number in this file, and DORAEMON is
+                         # entirely determined by it: the reference sets it per
+                         # environment (1600 for Hopper, and so on) and has no
+                         # default. A sensible choice here is the median return
+                         # of the sigma=0 reference arm, so that "solved" means
+                         # "as good as the undisturbed task about half the
+                         # time".
+                         #
+                         # WATCH doraemon_success and doraemon_median_return.
+                         # Pinned at 0 -> the threshold is unreachable and the
+                         # distribution never widens (every iteration prints
+                         # SKIPPED). Pinned at 1 -> it is trivial and DORAEMON
+                         # walks to the uniform in a few rounds, i.e. becomes
+                         # dr_sigma.
+kl_upper_bound: 0.05     # epsilon, the trust region between consecutive
+                         # distributions. SWEPT in the paper over
+                         # {0.1, 0.05, 0.01, 0.005, 0.001} with a different
+                         # winner per environment, so sweep it here too. It
+                         # sets the pace: with the constraint binding every
+                         # round, 0.05 walks Beta(100,100) to the uniform on
+                         # [0,3] in ten rounds.
+n_iters: 20              # outer iterations. The frame budget is split evenly,
+                         # so at 3M frames each round is 150k -- enough for the
+                         # policy to adapt to the widened range, and enough
+                         # rounds to reach the uniform at kl_upper_bound=0.05.
+                         # The reference uses 75-150 rounds over 7.5-15M steps,
+                         # i.e. the same 100k-ish per round.
+
+# --- the reference's two guards, both ON by default -------------------------
+train_until_lb: True     # `train_until_performance_lb`: do not touch the
+                         # distribution until the constraint holds ONCE.
+                         # Widening a range the policy cannot handle yet is
+                         # precisely how DR goes conservative, which is the
+                         # failure the paper exists to avoid.
+hard_constraint: True    # `hard_performance_constraint`: the performance
+                         # constraint may not be violated. If the CURRENT
+                         # distribution already fails it, the round is skipped
+                         # and the policy is given another round to catch up.
+                         # See baselines/docs/doraemon.md for the one piece of
+                         # this that is NOT implemented (the inverted problem
+                         # that searches for a feasible restart point).
+
+# --- solver bounds and sample budget ----------------------------------------
+min_bound: 0.8           # the sigmoid bounds the Beta parameters are
+max_bound: 110.0         # optimised inside: the reference's
+                         # `min_bound = 0.8`, `max_bound = init_beta_param + 10`.
+max_episodes: 1000       # cap on the episodes kept per round for the
+                         # importance-sampled constraint; the reference's
+                         # `max_dynamics_samples`. At 300 parallel workers and
+                         # 100-step episodes a round of 150k frames finishes
+                         # ~500 episodes, so this rarely binds.

@@ -1,0 +1,91 @@
+defaults:
+  - wisdom_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# WISDOM (EXTRA baseline X4) -- wavelet predictive representations for
+# non-stationary RL.
+#
+#   Wang, Li, He, Li, Bennis, Islam, Wang, arXiv 2510.04507.
+#   Code: MinWangcs/WISDOM (a fork of CEMRL, itself a fork of PEARL's rlkit).
+#
+# REQUIRES both of:
+#     task.ns_observe_prev_action=true
+#     task.ns_observe_prev_reward=true
+# so that a window of observations IS a window of (o, a, r) -- the context the
+# encoder is defined on.  Without them the encoder sees observations only and
+# the row is a different method.
+#
+# Continuous actions only; the reference is SAC with a squashed Gaussian.
+#
+# The shared SAC hyper-parameters are ISAC's, verbatim from
+# conf/algorithm/isac.yaml, so the wisdom-vs-isac row isolates what WISDOM
+# adds.  See baselines/docs/wisdom.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited ISAC plumbing -----------------------------------------------
+share_param_critic: True
+num_qvalue_nets: 2
+loss_function: "l2"
+delay_qvalue: True
+target_entropy: "auto"
+discrete_target_entropy_weight: 0.2   # unused (continuous only)
+alpha_init: 1.0
+min_alpha: null
+max_alpha: null
+fixed_alpha: False
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+
+# --- the context encoder ----------------------------------------------------
+time_steps: 30           # the reference's algo_params.time_steps. The whole
+                         # window is stored per transition, so the off-policy
+                         # buffer grows by memory_size * n_agents * 30 *
+                         # obs_dim. At the launcher's defaults that is a few
+                         # GB: LOWER off_policy_memory_size for this row if it
+                         # does not fit, rather than shortening the window,
+                         # which is the published value.
+latent_dim: 5            # the reference's algo_params.latent_size.
+encoder_hidden: 200      # the reference's MlpEncoder is [200, 200, 200].
+normalize_context: True  # the reference's use_data_normalization. NOT
+                         # cosmetic: the context carries a REWARD channel
+                         # whose scale is the host's, next to observation
+                         # channels that are O(1).
+
+# --- the learnable wavelet --------------------------------------------------
+wavelet_depth: 2         # wavelet_params.depth
+wavelet_kernel: 2        # wavelet_params.filter_size
+wavelet_dropout: 0.2     # the reference's Y_Network(dropout=0.2)
+wavelet_gamma: 0.99      # ReconstructionTrainer.gamma, the discount INSIDE
+                         # the wavelet TD operator. Separate from
+                         # experiment.gamma on purpose: it discounts the
+                         # sequence of task latents, not the reward.
+wavelet_tau: 0.005       # ReconstructionTrainer.soft_target_tau
+td_coef: 0.1             # algo_params.td_loss_coefficient
+
+# --- the encoder's objective ------------------------------------------------
+encoder_loss: reconstruction
+                         # THE ONE PLACE THE RELEASED CODE AND THE PAPER PART
+                         # COMPANY, and it is documented at length in
+                         # baselines/docs/wisdom.md.
+                         #
+                         # `kl_only` reproduces the release exactly: its
+                         # ReconstructionTrainer trains the encoder with
+                         # `kl_loss = 0.1 * kl_div` and NOTHING else, and there
+                         # is no decoder anywhere in the tree. An encoder whose
+                         # only objective is the KL to N(0, I) is minimised by
+                         # ignoring its input, so z collapses to the prior and
+                         # the wavelet has nothing to act on. Run it if a
+                         # reviewer asks what the release does.
+                         #
+                         # `reconstruction` restores CEMRL's decoder -- predict
+                         # (o', r) from (o, a, z) -- which is the objective the
+                         # released tree inherited and dropped. That is the
+                         # default, because it is the only version in which the
+                         # method described in the paper can work.
+decoder_hidden: 200
+kl_coef: 0.1             # the value the released code HARDCODES
+                         # (`kl_loss = 0.1 * kl_div`). Its own config file says
+                         # reconstruction_params.alpha_kl_z = 1e-3, which the
+                         # code never reads. The code wins; both are recorded
+                         # here so the discrepancy is visible.

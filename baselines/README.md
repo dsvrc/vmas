@@ -72,7 +72,15 @@ Reviewer objection → baseline, in BASELINES.md §C's order.
 | D.4 | information grant | **oracle-driver blind** | `task.ns_observe_driver=true` | env flag — [docs](docs/dr_sigma.md) |
 | B11, B12, Tier 3 | — | TPA, DGN, DCG, MAT, … | — | **skipped, with reasons** — [docs](docs/skipped.md) |
 
-Classes for the launcher: `b1 b2 b3 b4 b5 b6 b8 b9 b10 grants`.
+Classes for the launcher: `b1 b2 b4 b5 b6 b8 b9 b10 grants`.
+
+**B3 (`mappo_gnn`) is no longer in the default sweep.** It is still reachable
+by name -- `GROUP=b3 bash scripts/run_baselines.sh` -- exactly like the
+`reference` class, so nothing is deleted and the row can be produced later.
+
+**There are six more baselines**, in their own launcher and their own README:
+QCD+/RR, DEDA-FP, IPGA/INPG, WISDOM, DORAEMON and M3W. See
+[README_EXTRA.md](README_EXTRA.md) and `scripts/run_extra_baselines.sh`.
 
 There is an eleventh class, `reference` — stock MAPPO blind, PACT and B0 — and
 it is **not** in the default run. Those are the numbers the baseline rows are
@@ -186,9 +194,46 @@ explains it.
 
 ## 6. Status of this work
 
-Written but **not executed**: this machine has `torch` but no `torchrl`,
-`tensordict` or `vmas` installed, so nothing here has been run end to end.
-`baselines/verify.py` and `simple_ns/check_plumbing.py` are the parts that
-could be checked, and they pass. The first live run of each row should be a
-short one — `FRAMES=60000 SEEDS=0` — read for the banner and for
-`ns_live_frac`, before any sweep.
+**Every row has been run end to end** on a stack matching the cluster's `vmas`
+env — torch 2.6.0, torchrl 0.7.2, tensordict 0.7.2 — for a few hundred frames
+each. All 16 construct, train and log. What that smoke run checks, per row:
+
+* the construction banner resolves what it should (observation slices, ESO
+  gains, block sizes, phase budgets);
+* the dial fires (`ns_live_frac = 1.0`) and the load is identical across arms
+  that should share it;
+* the method's own diagnostics move — HAPPO's `happo_agent` averages 1.5 over
+  a sweep (all four agents, equally), LCPO takes the trust-region branch with
+  `kl_out` under its bound and the line search accepting, RMA crosses its phase
+  boundary, the B10 arms report `cancelled_frac`.
+
+**It is a wiring test, not a result.** A few hundred frames says the method
+runs; it says nothing about whether it works. The numbers in the smoke runs are
+meaningless and none are quoted anywhere.
+
+Three real bugs came out of it, all now fixed: `DialParams` is a frozen
+dataclass so the domain-randomisation flag could not set `severity`; the B10
+arms emitted diagnostic keys under names the task's debug row does not read, so
+they wrote no estimator columns at all; and LCPO's `ood_threshold` default was
+the paper's `1.0`, which on this context scale can **never** fire — every
+iteration took the A2C fallback, i.e. LCPO never ran. See §4 and
+[docs/lcpo.md](docs/lcpo.md).
+
+### Reproducing the smoke stack
+
+The cluster env is **below** `setup.py`'s `torchrl>=0.10,<0.12` pin, so code
+written against 0.10+ spellings breaks there — that is what
+`benchmarl/algorithms/_compat.py` exists for, and what the `torchrl` section of
+`verify.py` checks. To reproduce the local replica:
+
+```bash
+python -m venv /tmp/bmenv
+/tmp/bmenv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch==2.6.0
+/tmp/bmenv/bin/pip install tensordict==0.7.2 torchrl==0.7.2 torchvision==0.21.0 \
+                           hydra-core tqdm gym==0.26.2 torch_geometric
+PYTHONPATH=/path/to/vmas /tmp/bmenv/bin/python simple_ns/run.py algorithm=happo ...
+```
+
+Aligning the cluster with the pin instead (torchrl 0.10.x needs torch 2.9)
+would remove this whole class of problem; the shims make the code correct on
+both sides, but the pin exists for more than the two names they cover.

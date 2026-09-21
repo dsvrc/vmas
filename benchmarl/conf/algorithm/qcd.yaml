@@ -1,0 +1,98 @@
+defaults:
+  - qcd_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# QCD+ / RR (EXTRA baseline X1) -- prior-free black-box non-stationary RL by
+# detect-and-restart.
+#
+#   Gerogiannis, Huang, Veeravalli, "Is Prior-Free Black-Box Non-Stationary
+#   Reinforcement Learning Feasible?", arXiv 2410.13772.
+#   Detector: the Bernoulli GLR of Besson, Kaufmann, Maillard & Seznec,
+#   JMLR 2022, which that paper's Algorithm 3 plugs in.
+#
+# This arm assumes NOTHING about the disturbance -- no driver, no latent, no
+# coupling.  It watches the reward stream, declares a change, and throws the
+# learner away.  Run it BLIND (task.pact_enabled=false, no information grants):
+# the whole point is what a method that models nothing can do.
+#
+# See baselines/docs/qcd.md.
+# ---------------------------------------------------------------------------
+
+# --- inherited MAPPO plumbing; identical to conf/algorithm/mappo.yaml so the
+#     qcd-vs-mappo row prices the wrapper alone -----------------------------
+share_param_critic: True
+clip_epsilon: 0.2
+entropy_coef: 0.0
+critic_coef: 1.0
+loss_critic_type: "l2"
+lmbda: 0.9
+scale_mapping: "biased_softplus_1.0"
+use_tanh_normal: True
+minibatch_advantage: False
+
+# --- which of the paper's algorithms ---------------------------------------
+detector: glr            # glr    -> Algorithm 3 (QCD+): Bernoulli GLR on the
+                         #           reward stream, full restart on alarm.
+                         # random -> Algorithm 2 (RR): restart at i.i.d.
+                         #           Geometric times.  The paper's own
+                         #           order-optimal baseline and what Theorem 4
+                         #           says MASTER degenerates into -- so the
+                         #           glr-vs-random pair is the paper's central
+                         #           comparison, reproduced here.
+                         # none   -> no restarts. Stock MAPPO reached through
+                         #           this file, as the wrapper's control.
+
+# --- the GLR detector -------------------------------------------------------
+delta: 0.0               # the false-alarm probability in the published
+                         # threshold beta(n, delta) = log(4 n sqrt(n) / delta).
+                         # 0 means 1/sqrt(T) with T the number of detector
+                         # samples in the whole run, which is the standard
+                         # prior-free choice and inside the paper's stated
+                         # "order 1/poly(T)".  The algorithm prints the value
+                         # it resolved.
+min_samples: 30          # no alarm before this many post-restart samples. A
+                         # GLR on two points is defined but meaningless, and an
+                         # alarm in the first few steps after a restart costs a
+                         # restart and buys nothing.
+max_samples: 5000        # cap on the post-restart history the statistic runs
+                         # over.  The reference keeps everything; the statistic
+                         # is O(n) per sample, so an unbounded history turns
+                         # into an O(F^2) detector over a 3M-frame run. At the
+                         # launcher's defaults a restart-free run reaches
+                         # 10000 samples, so the cap binds only on the longest
+                         # quiet stretches.
+
+# --- the map onto [0, 1] the GLR is defined on -----------------------------
+# THE ONE ADAPTATION THIS DETECTOR NEEDS, and it is host-dependent. The GLR
+# tests a [0, 1]-valued stream; a bandit's rewards already are, a VMAS
+# per-step team reward is not. The stream is (reward - low) / (high - low),
+# clipped, and `qcd_clip_frac` reports how much of it saturated.
+#
+# CHECK THESE FOR A NEW HOST. The defaults bracket the per-STEP team-mean
+# reward on simple_ns/balance, whose reward is dominated by a -10-per-step
+# catastrophic term. If qcd_clip_frac is near 0 the range is too wide and the
+# detector is deaf; if it is large the range is too narrow and it is blind.
+reward_low: -3.0
+reward_high: 1.0
+
+# --- RR (detector=random) ---------------------------------------------------
+rr_interval: 1000        # eta_r = 1 / rr_interval, in DETECTOR SAMPLES -- one
+                         # per environment step of the vectorised env, so at
+                         # the launcher's 300 workers and 3M frames a run is
+                         # ~10000 samples and this is ~10 restarts. The paper
+                         # only fixes eta_r up to the unknown change rate
+                         # (eta_r = sqrt(eta / polylog T)), so this is a
+                         # declared sweep point, not a published constant.
+
+# --- what a restart resets --------------------------------------------------
+restart_critic: True     # "H_B <- {}" is "forget everything this instance
+                         # learned", and the value function is part of the
+                         # learner. False keeps the critic and restarts only
+                         # the policy; it exists to price which half of the
+                         # learner the restart is actually throwing away.
+warmup_samples: 500      # detector samples discarded at the start of training.
+                         # Nothing has been learned yet, so a restart there
+                         # costs nothing, and the reward stream in the first
+                         # few hundred steps is dominated by the policy moving
+                         # rather than by the environment.

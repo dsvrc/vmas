@@ -43,7 +43,7 @@ from dataclasses import dataclass, MISSING
 from typing import Dict, Iterable, Optional, Tuple, Type
 
 import torch
-from tensordict import TensorDict, TensorDictBase
+from tensordict import TensorDict, TensorDictBase, TensorDictParams
 from tensordict.nn import TensorDictModule
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from torchrl.objectives import LossModule, SACLoss, ValueEstimators
@@ -76,6 +76,16 @@ class HasacLoss(SACLoss):
     still trained against agent m's UPDATED policy -- the property the method
     rests on -- while each call costs one backward pass rather than N.
     """
+
+    #  Redeclared so torchrl's convert_to_functional does not warn: it
+    #  checks the SUBCLASS's own __annotations__, which is empty unless
+    #  the names are repeated here.  Same list torchrl's own losses carry.
+    actor_network: TensorDictModule
+    qvalue_network: TensorDictModule
+    actor_network_params: TensorDictParams
+    qvalue_network_params: TensorDictParams
+    target_actor_network_params: TensorDictParams
+    target_qvalue_network_params: TensorDictParams
 
     def __init__(
         self,

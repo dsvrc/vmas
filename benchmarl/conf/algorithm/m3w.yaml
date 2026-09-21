@@ -1,0 +1,97 @@
+defaults:
+  - m3w_config
+  - _self_
+
+# ---------------------------------------------------------------------------
+# M3W (EXTRA baseline X6) -- MoE-based multi-agent world model, with planning.
+#
+#   Zhao, Zhao, Xu, Fu, Chai, Zhu, Zhao, NeurIPS 2025.
+#   Code: zhaozijie2022/m3w-marl.  Built on HARL, TDMPC2 and Light-SoftMoE.
+#
+# The only MODEL-BASED row in the table, and the only one that chooses its
+# action by SEARCH rather than by evaluating a policy.
+#
+# REQUIRES both of:
+#     task.ns_observe_prev_action=true
+#     task.ns_observe_prev_reward=true
+# so that a window of observations is a window of TRANSITIONS -- which is what
+# an h-step model rollout and an n-step return are defined on.
+#
+# Continuous actions only.  BenchMARL's `model=` config is IGNORED: an MoE
+# dynamics model and a two-hot distributional critic are not expressible as an
+# MLP width, and swapping them for one would make the row about something else.
+#
+# THIS ROW IS SLOW.  Planning runs plan_iterations * horizon dynamics AND
+# reward forwards over (n_envs * num_samples) agent-token sets at EVERY
+# environment step.  The launcher drops off_policy_n_envs_per_worker for this
+# row rather than touching the planner's published settings.
+#
+# See baselines/docs/m3w.md.
+# ---------------------------------------------------------------------------
+
+# --- the world model (algo_args.world_model in the reference config) -------
+latent_dim: 128          # world_model.latent_dim
+simnorm_dim: 8           # world_model.simnorm_dim
+num_enc_layers: 2        # world_model.num_enc_layers
+dynamics_hidden: 512     # the reference's CenMoEDynamicsModel mlp_dims=[512,512]
+num_dynamics_experts: 16 # world_model.num_dynamics_experts
+num_reward_experts: 16   # world_model.num_reward_experts
+top_k: 2                 # world_model.top_k -- the SparseMoE reward router
+reward_ffn_hidden: 1024  # CenMoERewardModel expert_ffn_hidden default
+reward_head_hidden: 512  # CenMoERewardModel head_hidden default
+num_bins: 101            # world_model.num_bins, the two-hot resolution
+reward_min: -10.0        # world_model.reward_min / reward_max. The bins are on
+reward_max: 10.0         # the SYMLOG scale, so [-10, 10] covers rewards up to
+                         # e^10 in magnitude -- ample for every simple_ns host,
+                         # including balance's -10-per-step catastrophic term.
+critic_hidden: 512       # the reference's model.hidden_sizes for the critic
+critic_dropout: 0.01     # DisRegQNet's default dropout
+actor_hidden: 128        # model.hidden_sizes = [128, 128]
+scale_tau: 0.01          # world_model.scale_tau (RunningScale)
+
+# --- the h-step model objective ---------------------------------------------
+horizon: 3               # plan.horizon, which is ALSO the rollout length the
+                         # model objective is formed over.
+n_step: 5                # the reference's algo.n_step is 20. 20 here would
+                         # make the stacked window 24 frames deep and the
+                         # replay buffer 24x wider than any other row's, for a
+                         # 100-step episode. 5 is a declared reduction; it is
+                         # the one place this row's compute was traded against
+                         # the published value, and it is in
+                         # baselines/docs/m3w.md.
+step_rho: 0.5            # world_model.step_rho, the geometric weighting on
+                         # the h-step losses.
+q_coef: 0.1              # world_model.q_coef
+reward_coef: 0.1         # world_model.reward_coef
+dynamics_coef: 20.0      # world_model.dynamics_coef
+balance_coef: 0.0005     # world_model.balance_coef -- the router's
+                         # load-balancing auxiliary.
+actor_entropy_coef: 0.0001
+                         # model.entropy_coef, in the actor objective.
+                         # Named apart from the PPO rows' `entropy_coef` on
+                         # purpose: it multiplies the log-probability inside
+                         # M3W's actor loss, not a PPO entropy bonus.
+fixed_order: False       # algo.fixed_order: a fresh random agent order every
+                         # actor sweep, as HARL's heterogeneous-agent family
+                         # requires.
+
+# --- the MPPI planner (algo_args.plan) ---------------------------------------
+use_plan: True           # plan.use_plan. False acts with the actor directly,
+                         # which is the ablation that prices the SEARCH.
+plan_iterations: 6       # plan.iterations
+num_samples: 128         # plan.num_samples
+num_pi_trajs: 8          # plan.num_pi_trajs
+num_elites: 16           # plan.num_elites
+min_std: 0.05            # plan.min_std
+max_std: 1.0             # plan.max_std
+temperature: 0.5         # plan.temperature
+
+# --- where the actions and rewards live in the observation ------------------
+action_slice_start: 0    # 0 means "the action_slice_size components just
+action_slice_size: 0     # before the reward column", which is where
+                         # ns_observe_prev_action puts them once
+                         # ns_observe_prev_reward is also on. 0 for the size
+                         # means "the action dimension", read from the spec.
+                         # The algorithm prints the slices it resolved and
+                         # raises if they do not fit or overlap.
+reward_slice_start: -1   # ns_observe_prev_reward appends the reward LAST.

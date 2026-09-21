@@ -74,6 +74,7 @@ class _CompensatorArm(ExertionMixin):
         self._conf = torch.ones(B, N, **f)
         self._corr = torch.zeros(B, N, D, **f)
         self._n_steps = torch.zeros(B, N, **f)
+        self._n_diverged = torch.zeros((), device=device, dtype=torch.long)
         self._build_estimator(world, device)
 
     # -- hooks for the concrete arms ------------------------------------
@@ -107,6 +108,7 @@ class _CompensatorArm(ExertionMixin):
         bad = ~torch.isfinite(pred)
         if bool(bad.any()):
             pred = torch.where(bad, torch.zeros_like(pred), pred)
+            self._n_diverged += bad.sum()
         self._pred = pred
         self._trust = torch.where(
             self._ready(), self._trust_const, 0.0
@@ -139,21 +141,39 @@ class _CompensatorArm(ExertionMixin):
     def _pred_for(self, index: int) -> Tensor:
         return self._pred[:, index]
 
+    def _estimator_info(self, index: int) -> Dict[str, Tensor]:
+        """Extra columns an estimator can supply.  The ESO has none."""
+        return {}
+
     def info(self, agent: Agent) -> Dict[str, Tensor]:
         info = super().info(agent)
         i = self._agent_index[agent.name]
-        applied = (self._trust[:, i] * self._pred[:, i]).abs()
-        truth = self._load[:, i].abs()
+        one = lambda t: t[:, i : i + 1]  # noqa: E731
+        #  THE SAME KEY NAMES PactMixin.info EMITS.  `SimpleNsClass`'s debug row
+        #  gates the whole pact/* block on `pact_trust` being present and then
+        #  picks the rest up by name, so an arm that invents its own spellings
+        #  writes no diagnostics at all -- which is how the first version of
+        #  this file produced a CSV with no estimator columns while claiming in
+        #  its own docstring that the arms were directly comparable to PACT.
         info.update(
             {
-                "pact_pred": self._pred[:, i : i + 1],
-                "pact_trust_applied": self._trust[:, i : i + 1],
-                "pact_trust_policy": torch.full_like(
-                    self._pred[:, i : i + 1], self._trust_const
+                "pact_trust": one(self._trust),
+                "pact_conf": one(self._conf),
+                "pact_pred": one(self._pred),
+                "pact_corr": self._corr[:, i].norm(dim=-1, keepdim=True),
+                #  the headline for an invertible channel: how much of the
+                #  disturbance the estimate actually removed
+                "pact_residual": (self._load[:, i : i + 1] - one(self._pred)).abs(),
+                "pact_diverged": torch.full_like(
+                    one(self._pred), float(self._n_diverged)
                 ),
-                "pact_corr_vs_d": (applied / truth.clamp_min(1e-9)).unsqueeze(-1),
+                "pact_corr_vs_d": (
+                    self._corr[:, i].norm(dim=-1, keepdim=True)
+                    / self._d[:, i].norm(dim=-1, keepdim=True).clamp_min(1e-9)
+                ),
             }
         )
+        info.update(self._estimator_info(i))
         return info
 
 
@@ -330,6 +350,16 @@ class RlsRawMixin(_CompensatorArm):
 
     def _ready(self) -> Tensor:
         return self.rls.n_updates.min(dim=-1).values >= self._warmup
+
+    def _estimator_info(self, index: int) -> Dict[str, Tensor]:
+        #  The same three health columns PACT reports, because this arm runs the
+        #  same estimator: n_bounded rising is the signal B10 predicts, that the
+        #  raw N-1 design matrix is under-excited.
+        return {
+            "pact_updates": self.rls.n_updates[:, index : index + 1],
+            "pact_skipped": self.rls.n_skipped[:, index : index + 1],
+            "pact_bounded": self.rls.n_bounded[:, index : index + 1],
+        }
 
 
 def _pop_baseline(raw: Dict[str, Any], key: str, default):

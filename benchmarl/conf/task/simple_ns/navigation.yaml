@@ -203,3 +203,46 @@ rls_raw_use_operator: false  # false is BASELINES.md's literal wording --
                              # difference from PACT.  Report both; the claim
                              # should not rest on withholding public
                              # information.
+
+# ---------------------------------------------------------------------------
+# EXTRA baselines.  All OFF / inert by default: with these values the task is
+# bit-identical to the one every existing arm was run on.
+# See baselines/README_EXTRA.md.
+# ---------------------------------------------------------------------------
+
+ns_observe_prev_reward: false
+                             # X4 (WISDOM) / X6 (M3W).  true appends the reward
+                             # of the transition that produced this observation.
+                             # Both methods are defined on a window of
+                             # TRANSITIONS -- WISDOM's context encoder reads
+                             # (o, a, r, o'), M3W's critic target needs an
+                             # n-step return -- and a window of observations is
+                             # only a window of transitions if the reward is in
+                             # it.  vmas computes rewards before observations
+                             # inside one step, so the column is causal, and it
+                             # is the agent's OWN reward, which it has always
+                             # been told.  RAW: both methods normalise it
+                             # themselves, as their reference code does.
+
+ns_observe_time: false       # X2 (DEDA-FP).  true appends t/horizon in [0, 1],
+                             # t being the step index WITHIN the episode.  A
+                             # mean-field game is a finite-horizon object: its
+                             # equilibrium policy and its population
+                             # distribution are both functions of t, and
+                             # DEDA-FP's average policy and conditional
+                             # normalising flow are both conditioned on it.
+ns_time_horizon: 0           # the denominator; 0 means "use ns_period", which
+                             # equals max_steps on every simple_ns host.
+
+ns_dr_dist: uniform          # X5 (DORAEMON).  "uniform" is B9's fixed
+                             # U[ns_dr_low, ns_dr_high].  "beta" draws
+                             # Beta(a, b) rescaled onto the same support and
+                             # lets algorithm=doraemon REPLACE (a, b) between
+                             # training rounds -- which is the whole method.
+                             # Requires ns_dr_enabled=true.
+ns_dr_a: 100.0               # DORAEMON's `init_beta_param`: a = b = 100 is a
+ns_dr_b: 100.0               # distribution tightly concentrated on the middle
+                             # of the support.  Entropy maximisation starts
+                             # there and grows outward, which is the point --
+                             # starting from the uniform would leave nothing to
+                             # maximise.

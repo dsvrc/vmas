@@ -79,9 +79,11 @@ COMMON=(
 run_one () {
   local cfg="$1" seed="$2" algo="$3" arm="$4"; shift 4
   local dir="${OUT_ROOT}/${HOST}/${cfg}/s${seed}/${algo}_${arm}"
-  # BenchMARL nests a TIMESTAMPED folder under save_folder, so the finished
-  # marker is <dir>/*/checkpoints, never <dir>/checkpoints.
-  if compgen -G "${dir}/*/checkpoints" > /dev/null; then
+  # simple_ns/run.py nests a seed_<N> level under save_folder and BenchMARL
+  # nests a TIMESTAMPED folder under that, so the finished marker is
+  # <dir>/seed_*/*/checkpoints.  The second glob is the pre-seed_<N> layout,
+  # so a sweep that ran before that change still counts as finished.
+  if compgen -G "${dir}/seed_*/*/checkpoints" > /dev/null || compgen -G "${dir}/*/checkpoints" > /dev/null; then
     echo "== skip ${HOST} ${cfg} s${seed} ${algo} ${arm}"
     return 0
   fi

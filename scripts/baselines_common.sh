@@ -87,9 +87,11 @@ run_one () {
       echo "python simple_ns/run.py ${COMMON[*]} seed=${seed} experiment.save_folder=${dir} $* ${EXTRA}"
       continue
     fi
-    # BenchMARL nests a TIMESTAMPED folder under save_folder, so the finished
-    # marker is <dir>/*/checkpoints, never <dir>/checkpoints.
-    if compgen -G "${dir}/*/checkpoints" > /dev/null; then
+    # simple_ns/run.py nests a seed_<N> level under save_folder and BenchMARL
+    # nests a TIMESTAMPED folder under that, so the finished marker is
+    # <dir>/seed_*/*/checkpoints.  The second glob is the pre-seed_<N> layout,
+    # so a sweep that ran before that change still counts as finished.
+    if compgen -G "${dir}/seed_*/*/checkpoints" > /dev/null || compgen -G "${dir}/*/checkpoints" > /dev/null; then
       echo "== skip ${name} seed ${seed}"
       continue
     fi
@@ -165,6 +167,12 @@ ippo_gru () {
 }
 
 # --- B3  graph / communication ---------------------------------------------
+#  NOT IN THE DEFAULT SWEEP.  Removed from ALL_GROUPS on request: this row is
+#  not wanted in the standard run.  It is still reachable explicitly --
+#      GROUP=b3 bash scripts/run_baselines.sh
+#      ONLY=mappo_gnn bash scripts/run_baselines.sh
+#  -- exactly like the `reference` class, so nothing is deleted and the row can
+#  be produced later without editing anything.
 GROUP_b3="mappo_gnn"
 
 mappo_gnn () {
@@ -274,10 +282,172 @@ oracle_driver_blind () {
     task.ns_observe_driver=true task.pact_enabled=false
 }
 
+# ===========================================================================
+#  THE EXTRA BASELINES (X1 .. X6).  See baselines/README_EXTRA.md and
+#  baselines/docs/<name>.md.  Run them with scripts/run_extra_baselines.sh.
+# ===========================================================================
+
+# --- X1  prior-free black-box NS-RL: detect and restart ---------------------
+#  Gerogiannis, Huang, Veeravalli, arXiv 2410.13772.
+GROUP_x1="qcd_glr qcd_rr qcd_none"
+
+qcd_glr () {
+  #  Algorithm 3 (QCD+): Bernoulli GLR on the reward stream, full restart on
+  #  an alarm.  BLIND -- no driver, no latent, no coupling.  That is the point.
+  run_one qcd_glr algorithm=qcd algorithm.detector=glr task.pact_enabled=false
+}
+qcd_rr () {
+  #  Algorithm 2 (RR): restart at i.i.d. Geometric times.  The paper's own
+  #  order-optimal baseline, and what its Theorem 4 says MASTER degenerates
+  #  into.  The glr-vs-rr pair IS the paper's central comparison.
+  run_one qcd_rr algorithm=qcd algorithm.detector=random task.pact_enabled=false
+}
+qcd_none () {
+  #  The wrapper's control: same file, restarts off.  Any difference between
+  #  this and mappo_blind is a bug in the wrapper, not a result.
+  run_one qcd_none algorithm=qcd algorithm.detector=none task.pact_enabled=false
+}
+
+# --- X2  deep fictitious play for continuous mean field games ---------------
+#  Magnino, Shao, Wu, Shen, Lauriere, arXiv 2510.22158 (NeurIPS 2025).
+GROUP_x2="dedafp dedafp_br"
+
+dedafp () {
+  #  ns_observe_time is REQUIRED: the average policy and the conditional
+  #  normalising flow are both functions of t, and a finite-horizon mean field
+  #  equilibrium is not defined without it.
+  #  The LAST fictitious-play iteration deploys pibar, which is what
+  #  Algorithm 3 returns -- so the reported number is the equilibrium
+  #  policy's.
+  run_one dedafp algorithm=dedafp \
+    task.ns_observe_time=true task.pact_enabled=false \
+    experiment.share_policy_params=false
+}
+dedafp_br () {
+  #  The same run reporting the last BEST RESPONSE instead of the average.
+  #  Say which of the two the table shows; they are different policies.
+  run_one dedafp_br algorithm=dedafp algorithm.deploy_average_last=false \
+    task.ns_observe_time=true task.pact_enabled=false \
+    experiment.share_policy_params=false
+}
+
+# --- X3  independent learning in performative Markov potential games --------
+#  Sahitaj, Sasnauskas, Yalin, Mandal, Radanovic, arXiv 2504.20593.
+GROUP_x3="ipga inpg"
+
+ipga () {
+  #  share_policy_params=false is REQUIRED in spirit: these are INDEPENDENT
+  #  learners and the convergence results are about what N separate updates do
+  #  to the joint policy.  With one shared policy "independent" is vacuous and
+  #  the algorithm warns.
+  run_one ipga algorithm=ipga algorithm.variant=ipga \
+    experiment.share_policy_params=false task.pact_enabled=false
+}
+inpg () {
+  #  The natural-gradient variant: ONE Fisher-preconditioned step per rollout,
+  #  so the optimiser call count is set to 1.  Leaving BenchMARL's 45 x N in
+  #  place would train the critic hundreds of times per rollout against INPG's
+  #  once -- the same correction the LCPO row needs, for the same reason.
+  run_one inpg algorithm=ipga algorithm.variant=inpg \
+    experiment.share_policy_params=false task.pact_enabled=false \
+    "experiment.on_policy_minibatch_size=${BATCH}" \
+    "experiment.on_policy_n_minibatch_iters=1"
+}
+
+# --- X4  wavelet predictive representations (off-policy) --------------------
+#  Wang, Li, He, Li, Bennis, Islam, Wang, arXiv 2510.04507.
+#
+#  NOTE: the context window is stored per transition, so the off-policy buffer
+#  grows by memory_size * n_agents * time_steps * obs_dim.  At the stock
+#  1M-transition buffer that does not fit; WISDOM_BUFFER shrinks it rather
+#  than shortening the window, which is the published value.
+GROUP_x4="wisdom wisdom_release"
+WISDOM_BUFFER="${WISDOM_BUFFER:-100000}"
+
+wisdom () {
+  run_one wisdom algorithm=wisdom \
+    task.ns_observe_prev_action=true task.ns_observe_prev_reward=true \
+    task.pact_enabled=false \
+    "experiment.off_policy_memory_size=${WISDOM_BUFFER}"
+}
+wisdom_release () {
+  #  encoder_loss=kl_only reproduces the RELEASED tree exactly: its
+  #  ReconstructionTrainer trains the encoder with the KL to the prior and
+  #  nothing else, and there is no decoder anywhere in it.  z collapses.  Run
+  #  it if a reviewer asks what the release does; do not read it as the method.
+  #  See baselines/docs/wisdom.md.
+  run_one wisdom_release algorithm=wisdom algorithm.encoder_loss=kl_only \
+    task.ns_observe_prev_action=true task.ns_observe_prev_reward=true \
+    task.pact_enabled=false \
+    "experiment.off_policy_memory_size=${WISDOM_BUFFER}"
+}
+
+# --- X5  domain randomisation by entropy maximisation -----------------------
+#  Tiboni, Klink, Peters, Tommasi, D'Eramo, Chalvatzaki, ICLR 2024.
+#
+#  SET DORAEMON_SUCCESS FROM YOUR OWN B0 ROW.  It is the return at which an
+#  episode counts as solved and it is the only host-dependent number in the
+#  method; the reference sets it per environment and has no default.  A
+#  sensible choice is the MEDIAN return of the sigma=0 reference arm.
+GROUP_x5="doraemon"
+DORAEMON_SUCCESS="${DORAEMON_SUCCESS:-0.0}"
+
+doraemon () {
+  #  The B9 `dr_sigma` row with the range chosen by the method instead of by
+  #  hand.  Same support, so the pair prices the CURRICULUM alone.  Evaluate
+  #  the checkpoint at the committed sigma afterwards, exactly as
+  #  baselines/docs/dr_sigma.md says for dr_sigma.
+  run_one doraemon algorithm=doraemon task.pact_enabled=false \
+    task.ns_dr_enabled=true task.ns_dr_dist=beta \
+    task.ns_dr_low=0.0 task.ns_dr_high=3.0 \
+    "algorithm.success_return=${DORAEMON_SUCCESS}"
+}
+
+# --- X6  MoE world model, with planning (off-policy) ------------------------
+#  Zhao, Zhao, Xu, Fu, Chai, Zhu, Zhao, NeurIPS 2025.
+#
+#  THIS ROW IS SLOW.  Planning runs plan_iterations * horizon dynamics AND
+#  reward forwards over (n_envs * num_samples) agent-token sets at EVERY
+#  environment step.  M3W_ENVS drops the worker count rather than the
+#  planner's published settings; raise it if you have the compute.
+GROUP_x6="m3w m3w_noplan"
+M3W_ENVS="${M3W_ENVS:-32}"
+M3W_BATCH="${M3W_BATCH:-3200}"
+
+m3w () {
+  #  clip_grad_val=20 is the reference's own gradient clip on the world-model
+  #  optimiser; the algorithm prints a warning if it is left at BenchMARL's 5.
+  #  off_policy_init_random_frames is M3W's `warmup_steps`.
+  run_one m3w algorithm=m3w \
+    task.ns_observe_prev_action=true task.ns_observe_prev_reward=true \
+    task.pact_enabled=false \
+    "experiment.off_policy_n_envs_per_worker=${M3W_ENVS}" \
+    "experiment.off_policy_collected_frames_per_batch=${M3W_BATCH}" \
+    experiment.off_policy_init_random_frames=10000 \
+    experiment.clip_grad_norm=true experiment.clip_grad_val=20
+}
+m3w_noplan () {
+  #  use_plan=false acts with the actor directly.  The m3w-vs-m3w_noplan pair
+  #  is what prices the SEARCH, with the same world model behind both.
+  run_one m3w_noplan algorithm=m3w algorithm.use_plan=false \
+    task.ns_observe_prev_action=true task.ns_observe_prev_reward=true \
+    task.pact_enabled=false \
+    "experiment.off_policy_n_envs_per_worker=${M3W_ENVS}" \
+    "experiment.off_policy_collected_frames_per_batch=${M3W_BATCH}" \
+    experiment.off_policy_init_random_frames=10000 \
+    experiment.clip_grad_norm=true experiment.clip_grad_val=20
+}
+
 #  What a bare `run_baselines.sh` runs: the BASELINES.md rows only.  The stock
 #  MAPPO reference rows are a class of their own and are deliberately absent --
-#  see GROUP_reference above.
-ALL_GROUPS="b1 b2 b3 b4 b5 b6 b8 b9 b10 grants"
+#  see GROUP_reference above.  b3 (mappo_gnn) is absent for the same reason:
+#  it is not wanted in the standard sweep.  Both are still reachable by name.
+ALL_GROUPS="b1 b2 b4 b5 b6 b8 b9 b10 grants"
+
+#  The EXTRA baselines (X1..X6).  A class of their own so that
+#  `run_baselines.sh` is unchanged and `run_extra_baselines.sh` runs only the
+#  new work.  See baselines/README_EXTRA.md.
+EXTRA_GROUPS="x1 x2 x3 x4 x5 x6"
 
 #  Every class the launcher will accept, including the ones outside the default.
-KNOWN_GROUPS="reference ${ALL_GROUPS}"
+KNOWN_GROUPS="reference b3 ${ALL_GROUPS} ${EXTRA_GROUPS}"
