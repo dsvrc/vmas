@@ -44,6 +44,53 @@ LIST="${LIST:-0}"
 #  KEEP_GOING=1 for an overnight sweep, where one bad row should not cost the
 #  other thirty-nine; the failures are collected and printed at the end, and
 #  the script still exits non-zero.
+#  ---------------------------------------------------------------------
+#  WHAT MAKES A FINISHED RUN RENDERABLE AFTERWARDS
+#
+#  Nothing here renders.  Rendering on a compute node needs an X/EGL context
+#  that the cluster does not have, so the sweep stays `render=false` and the
+#  video is made LATER, on a machine with a display, by replaying a checkpoint
+#  (scripts/make_videos.py).  What that replay needs from the run is exactly
+#  two things, and both are produced below:
+#
+#    1. <run>/config.pkl              -- the task, its kwargs (severity, the
+#       PACT switch, the observation flags), the algorithm config, the model
+#       config and the seed.  BenchMARL writes it unconditionally at startup,
+#       so there is nothing to switch on; it is listed here because it is half
+#       of what you have to download and it is easy to leave behind.
+#    2. <run>/checkpoints/checkpoint_<frames>.pt   -- the weights.
+#
+#  CKPT_EVERY is the interval, in frames, and it is ALSO the crash insurance:
+#  with checkpointing at the end only, a job killed at 90% of its budget
+#  leaves nothing to replay.  It must divide the row's collected batch (the
+#  config validator raises otherwise), which is what ckpt_interval below is
+#  for -- never pass a bare number.
+#
+#  exclude_buffer_from_checkpoint is what keeps the files downloadable: the
+#  off-policy rows would otherwise write their whole replay buffer into every
+#  .pt (off_policy_memory_size transitions, gigabytes), and a replay needs the
+#  weights, not the buffer.
+#
+#      CKPT_EVERY=0 bash scripts/run_baselines.sh      # end of run only
+#      KEEP_CKPT=3  bash scripts/run_baselines.sh      # keep the last 3
+#  ---------------------------------------------------------------------
+CKPT_EVERY="${CKPT_EVERY:-600000}"
+#  `null` keeps every checkpoint.  They are a few MB each with the buffer
+#  excluded, and the FIRST one is the "before" of a before/after video, which
+#  a rolling window of 3 would have deleted by the end of the run.
+KEEP_CKPT="${KEEP_CKPT:-null}"
+
+#  The largest multiple of the row's batch that is <= CKPT_EVERY, because
+#  ExperimentConfig rejects a checkpoint_interval that is not a multiple of
+#  collected_frames_per_batch.  $1 is the row's batch.
+ckpt_interval () {
+  local batch="$1"
+  if [ "${CKPT_EVERY}" = "0" ] || [ -z "${batch}" ]; then echo 0; return; fi
+  local n=$(( CKPT_EVERY / batch ))
+  [ "${n}" -lt 1 ] && n=1
+  echo $(( n * batch ))
+}
+
 KEEP_GOING="${KEEP_GOING:-0}"
 BASELINE_FAILURES=""
 
@@ -67,6 +114,9 @@ COMMON=(
   "task.ns_severity=${SIGMA}"
   "experiment.render=false"
   "experiment.checkpoint_at_end=true"
+  "experiment.checkpoint_interval=$(ckpt_interval "${BATCH}")"
+  "experiment.keep_checkpoints_num=${KEEP_CKPT}"
+  "experiment.exclude_buffer_from_checkpoint=true"
   "experiment.max_n_frames=${FRAMES}"
   "experiment.sampling_device=${SAMPLING_DEVICE}"
   "experiment.train_device=${TRAIN_DEVICE}"
@@ -477,6 +527,17 @@ GROUP_x6="m3w"
 M3W_ENVS="${M3W_ENVS:-32}"
 M3W_BATCH="${M3W_BATCH:-3200}"
 
+#  Both intervals have to be multiples of the row's batch.  At the stock
+#  M3W_BATCH=3200 neither BenchMARL's evaluation_interval (120000) nor the
+#  sweep's CKPT_EVERY is one, so without this the row raises in
+#  ExperimentConfig.validate() before it collects a frame.
+M3W_EVAL_EVERY="${M3W_EVAL_EVERY:-120000}"
+m3w_eval_interval () {
+  local n=$(( M3W_EVAL_EVERY / M3W_BATCH ))
+  [ "${n}" -lt 1 ] && n=1
+  echo $(( n * M3W_BATCH ))
+}
+
 m3w () {
   #  clip_grad_val=20 is the reference's own gradient clip on the world-model
   #  optimiser; the algorithm prints a warning if it is left at BenchMARL's 5.
@@ -486,6 +547,8 @@ m3w () {
     task.pact_enabled=false \
     "experiment.off_policy_n_envs_per_worker=${M3W_ENVS}" \
     "experiment.off_policy_collected_frames_per_batch=${M3W_BATCH}" \
+    "experiment.checkpoint_interval=$(ckpt_interval "${M3W_BATCH}")" \
+    "experiment.evaluation_interval=$(m3w_eval_interval)" \
     experiment.off_policy_init_random_frames=10000 \
     experiment.clip_grad_norm=true experiment.clip_grad_val=20
 }
@@ -497,6 +560,8 @@ m3w_noplan () {
     task.pact_enabled=false \
     "experiment.off_policy_n_envs_per_worker=${M3W_ENVS}" \
     "experiment.off_policy_collected_frames_per_batch=${M3W_BATCH}" \
+    "experiment.checkpoint_interval=$(ckpt_interval "${M3W_BATCH}")" \
+    "experiment.evaluation_interval=$(m3w_eval_interval)" \
     experiment.off_policy_init_random_frames=10000 \
     experiment.clip_grad_norm=true experiment.clip_grad_val=20
 }

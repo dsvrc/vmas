@@ -85,10 +85,45 @@ LOGGERS="${LOGGERS:-[csv]}"
 EXTRA="${EXTRA:-}"
 OUT_ROOT="${OUT_ROOT:-runs/road_ns}"
 
+#  ---------------------------------------------------------------------
+#  WHAT MAKES A FINISHED RUN RENDERABLE AFTERWARDS
+#
+#  Nothing here renders: a compute node has no X/EGL context, so the sweep
+#  stays `render=false` and the video is made later, on a machine with a
+#  display, by replaying a checkpoint (scripts/make_videos.py).  That replay
+#  needs exactly two things from the run, and both are produced below --
+#  `<run>/config.pkl` (written unconditionally by BenchMARL: the task, its
+#  kwargs, the algorithm and model configs, the seed) and
+#  `<run>/checkpoints/checkpoint_<frames>.pt` (the weights).
+#
+#  CKPT_EVERY is also the crash insurance: with checkpointing at the end only,
+#  a job killed at 90% of its budget leaves nothing to replay.  It has to
+#  divide the collected batch, which is what ckpt_interval is for.
+#  exclude_buffer_from_checkpoint is what keeps the files downloadable -- the
+#  off-policy arms would otherwise write the whole replay buffer into every
+#  .pt, and a replay needs the weights, not the buffer.
+#
+#      CKPT_EVERY=0 bash scripts/cfg_main.sh       # end of run only
+#      KEEP_CKPT=3  bash scripts/cfg_main.sh       # keep the last 3
+#  ---------------------------------------------------------------------
+CKPT_EVERY="${CKPT_EVERY:-600000}"
+KEEP_CKPT="${KEEP_CKPT:-null}"
+
+ckpt_interval () {
+  local batch="$1"
+  if [ "${CKPT_EVERY}" = "0" ] || [ -z "${batch}" ]; then echo 0; return; fi
+  local n=$(( CKPT_EVERY / batch ))
+  [ "${n}" -lt 1 ] && n=1
+  echo $(( n * batch ))
+}
+
 COMMON=(
   "task=${TASK}"
   "experiment.render=false"
   "experiment.checkpoint_at_end=true"
+  "experiment.checkpoint_interval=$(ckpt_interval "${BATCH}")"
+  "experiment.keep_checkpoints_num=${KEEP_CKPT}"
+  "experiment.exclude_buffer_from_checkpoint=true"
   "experiment.max_n_frames=${FRAMES}"
   "experiment.sampling_device=${SAMPLING_DEVICE}"
   "experiment.train_device=${TRAIN_DEVICE}"

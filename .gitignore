@@ -174,3 +174,7 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 .idea/
 !/examples/evaluate/outputs/
+
+# scripts/pack_checkpoints.sh output
+checkpoints_*.tar.gz
+MANIFEST_checkpoints.txt
